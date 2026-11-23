@@ -3,112 +3,70 @@ import KeyboardShortcuts
 
 struct KeyboardSettingsTab: View {
     @ObservedObject var keyboardShortcutService = KeyboardShortcutService.shared
-    @ObservedObject var userPreferences = UserPreferences.shared
-
-    private var dateShortcutExample: String {
-        let exampleDate = Calendar.current.date(
-            bySettingHour: 15,
-            minute: 0,
-            second: 0,
-            of: Date()
-        ) ?? Date()
-        return exampleDate
-            .relativeDateDescription(withTime: true)
-            .replacingOccurrences(of: ", ", with: " ")
-            .lowercased(with: rmbDateTimeFormattedLocale())
-    }
 
     var body: some View {
-        Form {
-            SettingsSection {
-                Toggle(
-                    rmbLocalized(.keyboardShortcutEnableOpenShortcutOption, arguments: AppConstants.appName),
-                    isOn: $keyboardShortcutService.isOpenRemindersMenuBarEnabled
-                )
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingsPageHeader(title: "快捷键")
 
-                HStack(spacing: 8) {
-                    KeyboardShortcuts.Recorder(for: .openRemindersMenuBar)
+                SettingsCard(title: "全局呼出") {
+                    shortcutRow(
+                        title: "显示 / 隐藏窗口",
+                        name: .openRemindersMenuBar,
+                        isEnabled: $keyboardShortcutService.isOpenRemindersMenuBarEnabled
+                    )
 
-                    Button(action: {
-                        KeyboardShortcutService.shared.reset(.openRemindersMenuBar)
-                    }) {
-                        Text(rmbLocalized(.keyboardShortcutRestoreDefaultButton))
-                    }
-                }
-                .disabled(!keyboardShortcutService.isOpenRemindersMenuBarEnabled)
-            }
+                    shortcutRow(
+                        title: "剪贴板",
+                        name: .openClipboardHistory,
+                        isEnabled: $keyboardShortcutService.isOpenClipboardHistoryEnabled
+                    )
 
-            SettingsDivider()
+                    shortcutRow(
+                        title: "随笔",
+                        name: .openQuickNotes,
+                        isEnabled: $keyboardShortcutService.isOpenQuickNotesEnabled
+                    )
 
-            SettingsSection(rmbLocalized(.keyboardSmartTypingSettingsLabel)) {
-                Text(rmbLocalized(.keyboardSmartTypingNote))
-
-                TypingShortcutRow(
-                    shortcuts: [dateShortcutExample],
-                    description: rmbLocalized(.keyboardSmartTypingDateDescription),
-                    highlightColor: .rmbColor(.dateHighlight)
-                )
-                TypingShortcutRow(
-                    shortcuts: ["@work", "/personal"],
-                    description: rmbLocalized(.keyboardSmartTypingListDescription)
-                )
-                TypingShortcutRow(
-                    shortcuts: ["!", "!!", "!!!"],
-                    description: rmbLocalized(.keyboardSmartTypingPriorityDescription),
-                    highlightColor: .rmbColor(.priorityHighlight)
-                )
-                TypingShortcutRow(
-                    shortcuts: ["!f"],
-                    description: rmbLocalized(.keyboardSmartTypingFlagDescription),
-                    highlightColor: .rmbColor(.flaggedHighlight)
-                )
-                if #available(macOS 26, *) {
-                    TypingShortcutRow(
-                        shortcuts: ["!u"],
-                        description: rmbLocalized(.keyboardSmartTypingUrgentDescription),
-                        highlightColor: .rmbColor(.urgentHighlight)
+                    shortcutRow(
+                        title: "右上角小窗",
+                        name: .toggleCornerMiniWindow,
+                        isEnabled: $keyboardShortcutService.isToggleCornerMiniWindowEnabled,
+                        showDivider: false
                     )
                 }
-                TypingShortcutRow(
-                    shortcuts: ["#tag"],
-                    description: rmbLocalized(.keyboardSmartTypingTagDescription),
-                    highlightColor: .rmbColor(.tagHighlight)
-                )
+
+                Text("点击录制框自定义组合键，可随时恢复默认。")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 4)
             }
+            .padding(20)
         }
-        .padding(20)
     }
-}
 
-private struct TypingShortcutRow: View {
-    let shortcuts: [String]
-    let description: String
-    var highlightColor: Color = .primary
+    private func shortcutRow(
+        title: String,
+        name: KeyboardShortcuts.Name,
+        isEnabled: Binding<Bool>,
+        showDivider: Bool = true
+    ) -> some View {
+        SettingsRow(title, showDivider: showDivider) {
+            HStack(spacing: 8) {
+                KeyboardShortcuts.Recorder(for: name)
+                    .disabled(!isEnabled.wrappedValue)
 
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            HStack(spacing: 4) {
-                ForEach(shortcuts, id: \.self) { shortcut in
-                    Text(shortcut)
-                        .font(.system(.callout, design: .monospaced))
-                        .foregroundColor(highlightColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(highlightColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                Button("默认") {
+                    KeyboardShortcutService.shared.reset(name)
                 }
+                .controlSize(.small)
+                .disabled(!isEnabled.wrappedValue)
+
+                Toggle("", isOn: isEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
             }
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(width: 128, alignment: .leading)
-
-            Text(description)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
     }
-}
-
-#Preview {
-    KeyboardSettingsTab()
 }

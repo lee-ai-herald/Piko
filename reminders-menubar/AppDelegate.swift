@@ -1,11 +1,10 @@
 import Cocoa
 import SwiftUI
-import Combine
 
 @main
-struct RemindersMenuBar: App {
+struct PikoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
+
     var body: some Scene {
         if #available(macOS 14.0, *) {
             Window(String(""), id: "SettingsOpener") {
@@ -30,109 +29,90 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // swiftlint:disable:next implicitly_unwrapped_optional
     static private(set) var shared: AppDelegate!
 
-    private var didCloseCancellationToken: AnyCancellable?
-    private var didShowCancellationToken: AnyCancellable?
-    private var didCloseEventDate = Date.distantPast
-
-    private var globalOutsideClickMonitor: Any?
-    private var localOutsideClickMonitor: Any?
-    
     private var sharedAuthorizationErrorMessage: String?
     private var currentMenuBarCount = 0
-    private var currentReminderPreview: String?
+    private var currentPomodoroText: String?
 
-    let popover = NSPopover()
     lazy var statusBarItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    
-    var contentViewController: NSViewController {
-        let contentView = ContentView()
-        let remindersData = RemindersData()
-        let copyShortcutCoordinator = CopyShortcutCoordinator()
-        let newReminderTypingCoordinator = NewReminderTypingCoordinator()
-        return NSHostingController(
-            rootView: contentView
-                .environmentObject(remindersData)
-                .environmentObject(copyShortcutCoordinator)
-                .environmentObject(newReminderTypingCoordinator)
-        )
-    }
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         AppDelegate.shared = self
         LaunchAtLoginService.shared.migrateIfNeeded()
 
-        configurePopover()
+        _ = ClipboardHistoryStore.shared
+        _ = QuickNotesStore.shared
+
         configureMenuBarButton()
-        configureKeyboardShortcut()
-        configureDidCloseNotification()
-        configureDidShowNotification()
+        configureKeyboardShortcuts()
+
+        if RemindersService.shared.isAuthorized {
+            PinnedRemindersStore.shared.launchAndRestore()
+        } else {
+            requestAuthorization()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        stopOutsideClickMonitors()
+        ClipboardHistoryStore.shared.stopMonitoring()
     }
 
-    // Prevent the app from terminating because of the Settings window (or any auxiliary window).
-    // As a menu bar app with no main window, the popover serves as its primary UI.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
 
-    private func configurePopover() {
-        setMainPopoverSize(size: UserPreferences.shared.mainPopoverSize)
-        popover.animates = false
-        popover.behavior = .transient
-
-        if RemindersService.shared.isAuthorized {
-            popover.contentViewController = contentViewController
-        }
-    }
-    
     func updateMenuBarCount(to count: Int) {
         currentMenuBarCount = count
-        applyMenuBarButtonAppearance()
+        refreshMenuBarAppearance()
     }
 
-    func updateMenuBarReminderPreview(_ title: String?) {
-        currentReminderPreview = title
-        applyMenuBarButtonAppearance()
+    func updatePomodoroMenuBarText(_ text: String?) {
+        currentPomodoroText = text
+        refreshMenuBarAppearance()
     }
 
-    private func applyMenuBarButtonAppearance() {
-        let reminderPreview = currentReminderPreview
-        let menuBarCount = currentMenuBarCount
+    func refreshMenuBarAppearance() {
+        let countText = currentMenuBarCount > 0 ? String(currentMenuBarCount) : nil
+        let pomodoroText = currentPomodoroText
 
-        if let reminderPreview {
-            let hideCounter = UserPreferences.shared.hideCounterWhenReminderPreviewIsShown
-            if !hideCounter && menuBarCount > 0 {
-                statusBarItem.button?.title = "\(menuBarCount) · \(reminderPreview)"
-            } else {
-                statusBarItem.button?.title = reminderPreview
-            }
-        } else {
-            let buttonTitle = menuBarCount > 0 ? String(menuBarCount) : ""
-            statusBarItem.button?.title = buttonTitle
+        switch (countText, pomodoroText) {
+        case let (count?, timer?):
+            statusBarItem.button?.title = "\(count) · \(timer)"
+        case let (nil, timer?):
+            statusBarItem.button?.title = timer
+        case let (count?, nil):
+            statusBarItem.button?.title = count
+        case (nil, nil):
+            statusBarItem.button?.title = ""
         }
-
         loadMenuBarIcon()
     }
-    
+
     func loadMenuBarIcon() {
-        let isContentVisible = currentMenuBarCount > 0 || currentReminderPreview != nil
-        let shouldHideIcon = UserPreferences.shared.hideMenuBarIconWhenContentIsShown && isContentVisible
+        let hasText = currentMenuBarCount > 0 || currentPomodoroText != nil
+        let shouldHideIcon = UserPreferences.shared.hideMenuBarIconWhenContentIsShown && hasText
         statusBarItem.button?.image = shouldHideIcon ? nil : UserPreferences.shared.reminderMenuBarIcon.image
     }
-    
+
     private func configureMenuBarButton() {
         loadMenuBarIcon()
+        statusBarItem.button?.toolTip = AppConstants.appName
         statusBarItem.button?.imagePosition = .imageLeading
         statusBarItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusBarItem.button?.action = #selector(handleStatusBarButtonAction)
     }
-    
-    private func configureKeyboardShortcut() {
+
+    private func configureKeyboardShortcuts() {
         KeyboardShortcutService.shared.action(for: .openRemindersMenuBar) { [weak self] in
-            self?.togglePopover()
+            self?.openOrToggleBoard(tab: .board)
+        }
+        KeyboardShortcutService.shared.action(for: .openClipboardHistory) { [weak self] in
+            self?.openOrToggleBoard(tab: .clipboard)
+        }
+        KeyboardShortcutService.shared.action(for: .openQuickNotes) { [weak self] in
+            self?.openOrToggleBoard(tab: .notes)
+        }
+        KeyboardShortcutService.shared.action(for: .toggleCornerMiniWindow) {
+            PinnedPanelController.shared.toggleCornerMiniMode()
         }
     }
 
@@ -141,7 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if event.type == .rightMouseUp {
             showRightClickMenu()
         } else {
-            togglePopover()
+            openOrToggleBoard(tab: nil)
         }
     }
 
@@ -152,176 +132,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarItem.menu = nil
     }
 
-    @objc private func togglePopover() {
-        guard RemindersService.shared.isAuthorized else {
+    private func openOrToggleBoard(tab: BoardTab?) {
+        let requiresRemindersAuth = (tab != .clipboard && tab != .notes)
+        if requiresRemindersAuth && !RemindersService.shared.isAuthorized {
             requestAuthorization()
             return
         }
-        
-        guard let button = statusBarItem.button else {
-            return
-        }
-        
-        if popover.contentViewController == nil {
-            popover.contentViewController = contentViewController
-        }
-        
-        if popover.isShown || didCloseEventDate.elapsedTimeInterval < 0.01 {
-            didCloseEventDate = .distantPast
-            popover.performClose(button)
-        } else {
-            showPopover(relativeTo: button)
-        }
-    }
-
-    private func showPopover(relativeTo button: NSStatusBarButton) {
-        if #available(macOS 14.0, *) {
-            NSApp.activate()
-        } else {
-            NSApp.activate(ignoringOtherApps: true)
-        }
-
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
-    }
-
-    // - MARK: Popover sizing
-
-    func setMainPopoverSize(size: NSSize, persist: Bool = false) {
-        let clampedSize = clampedMainPopoverSize(size: size)
-        popover.contentSize = clampedSize
-
-        if persist {
-            UserPreferences.shared.mainPopoverSize = clampedSize
-        }
-    }
-
-    private func mainScreenVisibleFrame() -> NSRect {
-        if let screen = statusBarItem.button?.window?.screen {
-            return screen.visibleFrame
-        }
-        return NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
-    }
-
-    private func clampedMainPopoverSize(size: NSSize) -> NSSize {
-        let screenSize = mainScreenVisibleFrame()
-
-        let maxWidth = (screenSize.width - MainPopoverSizing.minWidthPadding)
-            .constrainedTo(min: MainPopoverSizing.minSize.width, max: MainPopoverSizing.maxSize.width)
-        let width = size.width.constrainedTo(min: MainPopoverSizing.minSize.width, max: maxWidth)
-
-        let maxHeight = (screenSize.height - MainPopoverSizing.minHeightPadding)
-            .constrainedTo(min: MainPopoverSizing.minSize.height, max: MainPopoverSizing.maxSize.height)
-        let height = size.height.constrainedTo(min: MainPopoverSizing.minSize.height, max: maxHeight)
-
-        return NSSize(width: width, height: height)
-    }
-
-    // - MARK: Fallback for popover open/close behavior
-
-    private func configureDidCloseNotification() {
-        // NOTE: There is an issue where if the menu bar button is clicked on its top part to close the popover
-        // there will be a didClose event and then togglePopover will be called (reopening the popover).
-        // didCloseEventDate is saved to figure out if the event is recent and the popover should not be reopened.
-        didCloseCancellationToken = NotificationCenter.default
-            .publisher(for: NSPopover.didCloseNotification, object: popover)
-            .sink { [weak self] _ in
-                self?.didCloseEventDate = Date()
-                self?.stopOutsideClickMonitors()
-            }
-    }
-
-    private func configureDidShowNotification() {
-        // SwiftUI `Menu` inside an NSPopover can occasionally break the system's transient dismissal behavior.
-        // Install a fallback outside-click monitor while the popover is visible.
-        didShowCancellationToken = NotificationCenter.default
-            .publisher(for: NSPopover.didShowNotification, object: popover)
-            .sink { [weak self] _ in
-                self?.startOutsideClickMonitors()
-            }
-    }
-
-    private func startOutsideClickMonitors() {
-        stopOutsideClickMonitors()
-
-        globalOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            MainActor.assumeIsolated {
-                if self?.isClickOutsidePopover(event: event) ?? false {
-                    self?.popover.performClose(nil)
-                }
-            }
-        }
-
-        localOutsideClickMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            // Return nil to swallow the event when dismissing, matching native transient popover behavior.
-            let shouldClose = MainActor.assumeIsolated {
-                self?.isClickOutsidePopover(event: event) ?? false
-            }
-            if shouldClose {
-                self?.popover.performClose(nil)
-            }
-            return shouldClose ? nil : event
-        }
-    }
-
-    private func stopOutsideClickMonitors() {
-        if let monitor = globalOutsideClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalOutsideClickMonitor = nil
-        }
-        if let monitor = localOutsideClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            localOutsideClickMonitor = nil
-        }
-    }
-
-    private func isClickOutsidePopover(event: NSEvent) -> Bool {
-        guard popover.isShown else { return false }
-
-        let mouseLocation = NSEvent.mouseLocation
-
-        if isMouseInsideStatusBarButton(mouseLocation) {
-            return false
-        }
-
-        if let popoverWindow = popover.contentViewController?.view.window,
-           popoverWindow.frame.contains(mouseLocation) {
-            return false
-        }
-
-        if let window = NSApp.window(withWindowNumber: event.windowNumber),
-           window.frame.contains(mouseLocation) {
-            return false
-        }
-
-        return true
-    }
-
-    private func isMouseInsideStatusBarButton(_ mouseLocation: NSPoint) -> Bool {
-        guard let button = statusBarItem.button,
-              let window = button.window else {
-            return false
-        }
-
-        let rectInWindow = button.convert(button.bounds, to: nil)
-        let rectOnScreen = window.convertToScreen(rectInWindow)
-        return rectOnScreen.contains(mouseLocation)
+        PinnedRemindersStore.shared.togglePanelVisibility(tab: tab)
     }
 }
 
-// - MARK: Authorization functions
+// MARK: - Authorization
 
 extension AppDelegate: NSAlertDelegate {
     private func requestAuthorization() {
         RemindersService.shared.requestAccess { [weak self] granted, errorMessage in
             if granted {
+                Task { @MainActor in
+                    PinnedRemindersStore.shared.launchAndRestore()
+                }
                 return
             }
-                
+
             print("Access to reminders not granted:", errorMessage ?? "no error description")
             DispatchQueue.main.async {
                 self?.sharedAuthorizationErrorMessage = errorMessage
@@ -329,7 +161,7 @@ extension AppDelegate: NSAlertDelegate {
             }
         }
     }
-    
+
     private func presentNoAuthorizationAlert() {
         let alert = NSAlert()
         alert.messageText = rmbLocalized(.appNoRemindersAccessAlertMessage, arguments: AppConstants.appName)
@@ -346,11 +178,11 @@ extension AppDelegate: NSAlertDelegate {
             alert.delegate = self
             alert.showsHelp = true
         }
-        
+
         alert.addButton(withTitle: rmbLocalized(.okButton))
         alert.addButton(withTitle: rmbLocalized(.openSystemPreferencesButton))
         alert.addButton(withTitle: rmbLocalized(.appQuitButton)).hasDestructiveAction = true
-        
+
         NSApp.activate(ignoringOtherApps: true)
         let modalResponse = alert.runModal()
         switch modalResponse {
@@ -364,7 +196,7 @@ extension AppDelegate: NSAlertDelegate {
             sharedAuthorizationErrorMessage = nil
         }
     }
-    
+
     internal func alertShowHelp(_ alert: NSAlert) -> Bool {
         let helpAlert = NSAlert()
         let errorDescription = sharedAuthorizationErrorMessage ?? "no error description"
@@ -372,7 +204,6 @@ extension AppDelegate: NSAlertDelegate {
         helpAlert.messageText = rmbLocalized(.appNoRemindersAccessAlertMessage, arguments: AppConstants.appName)
         helpAlert.informativeText = "Authorization error: \(errorDescription)"
         helpAlert.runModal()
-        
         return true
     }
 }

@@ -4,8 +4,6 @@ private enum PreferencesKeys {
     static let reminderMenuBarIcon = "reminderMenuBarIcon"
     static let calendarIdentifiersFilter = "calendarIdentifiersFilter"
     static let calendarIdentifierForSaving = "calendarIdentifierForSaving"
-    static let autoSuggestTodayForNewReminders = "autoSuggestTodayForNewReminders"
-    static let closePopoverAfterCreatingReminder = "closePopoverAfterCreatingReminder"
     static let rmbColorScheme = "rmbColorScheme"
     static let preferTransparentBackground = "backgroundIsTransparent"
     static let showUpcomingReminders = "showUpcomingReminders"
@@ -16,34 +14,37 @@ private enum PreferencesKeys {
     static let filterMenuBarContentByCalendar = "filterMenuBarCountByCalendar"
     static let hideMenuBarIconWhenContentIsShown = "hideMenuBarIconWhenCounterIsShown"
     static let preferredLanguage = "preferredLanguage"
-    static let copyProperties = "copyProperties"
-    static let copyIncludePropertyNames = "copyIncludePropertyNames"
-    static let mainPopoverSize = "mainPopoverSize"
     static let showUpcomingReminderListName = "showUpcomingReminderListName"
     static let showRemindersWithDueDateOnTop = "showRemindersWithDueDateOnTop"
     static let sortRemindersByFlagAndPriority = "sortRemindersByPriority"
     static let reminderSortingOrder = "reminderSortingOrder"
     static let timeFormatIs24Hour = "timeFormatIs24Hour"
     static let firstWeekday = "firstWeekday"
-    static let showExternalLinksInReminderItem = "showExternalLinksInReminderItem"
     static let showNotesInReminderItem = "showNotesInReminderItem"
-    static let menuBarReminderPreviewEnabled = "menuBarReminderPreviewEnabled"
-    static let menuBarReminderPreviewTimeAhead = "menuBarReminderPreviewTimeAhead"
-    static let menuBarReminderPreviewMaxLength = "menuBarReminderPreviewMaxLength"
-    static let hideCounterWhenReminderPreviewIsShown = "hideCounterWhenReminderPreviewIsShown"
-    static let menuBarReminderPreviewShowTodayReminders = "menuBarReminderPreviewShowTodayReminders"
-    static let tagsFilter = "tagsFilter"
-    static let showTagsBeforeCalendars = "showTagsBeforeCalendars"
-    static let filterTagRemindersByCalendar = "filterTagRemindersByCalendar"
-    static let completionAnimationEnabled = "completionAnimationEnabled"
+    static let pinnedReminderIds = "pinnedReminderIds"
+    static let pinnedSchedules = "pinnedSchedules"
+    static let pinnedPanelFrame = "pinnedPanelFrame"
+    static let isPinnedPanelVisible = "isPinnedPanelVisible"
+    static let isPinnedPanelCollapsed = "isPinnedPanelCollapsed"
+    static let isBoardAlwaysOnTop = "isBoardAlwaysOnTop"
+    static let completedTimeRange = "completedTimeRange"
+    static let clipboardMaxItems = "clipboardMaxItems"
+    static let defaultNoteColorTag = "defaultNoteColorTag"
+    static let isNoteMarkdownEnabled = "isNoteMarkdownEnabled"
+    static let pomodoroFocusMinutes = "pomodoroFocusMinutes"
+    static let pomodoroShortBreakMinutes = "pomodoroShortBreakMinutes"
+    static let pomodoroLongBreakMinutes = "pomodoroLongBreakMinutes"
+    static let pomodoroSoundEnabled = "pomodoroSoundEnabled"
+    static let pomodoroShowInMenuBar = "pomodoroShowInMenuBar"
+    static let pomodoroCompletedTodayDate = "pomodoroCompletedTodayDate"
+    static let pomodoroCompletedTodayCount = "pomodoroCompletedTodayCount"
 }
 
-// TODO: Resolve body length of UserPreferences
-// swiftlint:disable:next type_body_length
 class UserPreferences: ObservableObject {
     static let shared = UserPreferences()
 
     private var accessibilityObserver: NSObjectProtocol?
+    private static let defaults = UserDefaults.standard
 
     private init() {
         accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -57,373 +58,192 @@ class UserPreferences: ObservableObject {
 
     deinit {
         if let observer = accessibilityObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-    }
-    
-    private static let defaults = UserDefaults.standard
-    
-    @Published var reminderMenuBarIcon: RmbIcon = {
-        guard let menuBarIconString = defaults.string(forKey: PreferencesKeys.reminderMenuBarIcon) else {
-            return RmbIcon.defaultIcon
-        }
-        return RmbIcon(rawValue: menuBarIconString) ?? RmbIcon.defaultIcon
-    }() {
-        didSet {
-            UserPreferences.defaults.set(reminderMenuBarIcon.rawValue, forKey: PreferencesKeys.reminderMenuBarIcon)
-        }
-    }
-    
-    var preferredCalendarIdentifiersFilter: [String]? {
-        get {
-            return UserPreferences.defaults.stringArray(forKey: PreferencesKeys.calendarIdentifiersFilter)
-        }
-        set {
-            UserPreferences.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifiersFilter)
-        }
-    }
-    
-    var preferredCalendarIdentifierForSaving: String? {
-        get {
-            return UserPreferences.defaults.string(forKey: PreferencesKeys.calendarIdentifierForSaving)
-        }
-        set {
-            UserPreferences.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifierForSaving)
-        }
-    }
-    
-    @Published var autoSuggestToday: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.autoSuggestTodayForNewReminders)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(autoSuggestToday, forKey: PreferencesKeys.autoSuggestTodayForNewReminders)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
 
-    @Published var closePopoverAfterCreatingReminder: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.closePopoverAfterCreatingReminder)
+    @Published var reminderMenuBarIcon: RmbIcon = {
+        guard let icon = defaults.string(forKey: PreferencesKeys.reminderMenuBarIcon) else {
+            return RmbIcon.defaultIcon
+        }
+        return RmbIcon(rawValue: icon) ?? RmbIcon.defaultIcon
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                closePopoverAfterCreatingReminder,
-                forKey: PreferencesKeys.closePopoverAfterCreatingReminder
-            )
+            Self.defaults.set(reminderMenuBarIcon.rawValue, forKey: PreferencesKeys.reminderMenuBarIcon)
         }
     }
-    
+
+    var preferredCalendarIdentifiersFilter: [String]? {
+        get { Self.defaults.stringArray(forKey: PreferencesKeys.calendarIdentifiersFilter) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifiersFilter) }
+    }
+
+    var preferredCalendarIdentifierForSaving: String? {
+        get { Self.defaults.string(forKey: PreferencesKeys.calendarIdentifierForSaving) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifierForSaving) }
+    }
+
     @Published var upcomingRemindersInterval: ReminderInterval = {
-        guard let intervalData = defaults.data(forKey: PreferencesKeys.upcomingRemindersInterval),
-              let interval = try? JSONDecoder().decode(ReminderInterval.self, from: intervalData) else {
+        guard let data = defaults.data(forKey: PreferencesKeys.upcomingRemindersInterval),
+              let interval = try? JSONDecoder().decode(ReminderInterval.self, from: data) else {
             return .today
         }
         return interval
     }() {
         didSet {
-            let intervalData = try? JSONEncoder().encode(upcomingRemindersInterval)
-            UserPreferences.defaults.set(intervalData, forKey: PreferencesKeys.upcomingRemindersInterval)
+            let data = try? JSONEncoder().encode(upcomingRemindersInterval)
+            Self.defaults.set(data, forKey: PreferencesKeys.upcomingRemindersInterval)
         }
     }
-    
+
     @Published var filterUpcomingRemindersByCalendar: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.filterUpcomingRemindersByCalendar)
+        defaults.bool(forKey: PreferencesKeys.filterUpcomingRemindersByCalendar)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                filterUpcomingRemindersByCalendar,
-                forKey: PreferencesKeys.filterUpcomingRemindersByCalendar
-            )
+            Self.defaults.set(filterUpcomingRemindersByCalendar, forKey: PreferencesKeys.filterUpcomingRemindersByCalendar)
         }
     }
-    
+
     @Published var showUpcomingReminders: Bool = {
-        return defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showUpcomingReminders)
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showUpcomingReminders)
     }() {
         didSet {
-            UserPreferences.defaults.set(showUpcomingReminders, forKey: PreferencesKeys.showUpcomingReminders)
+            Self.defaults.set(showUpcomingReminders, forKey: PreferencesKeys.showUpcomingReminders)
         }
     }
 
     @Published var hideUpcomingRemindersFromLists: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.hideUpcomingRemindersFromLists)
+        defaults.bool(forKey: PreferencesKeys.hideUpcomingRemindersFromLists)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                hideUpcomingRemindersFromLists,
-                forKey: PreferencesKeys.hideUpcomingRemindersFromLists
-            )
+            Self.defaults.set(hideUpcomingRemindersFromLists, forKey: PreferencesKeys.hideUpcomingRemindersFromLists)
         }
     }
-    
+
     @Published var showUpcomingReminderListName: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.showUpcomingReminderListName)
+        defaults.bool(forKey: PreferencesKeys.showUpcomingReminderListName)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                showUpcomingReminderListName,
-                forKey: PreferencesKeys.showUpcomingReminderListName
-            )
+            Self.defaults.set(showUpcomingReminderListName, forKey: PreferencesKeys.showUpcomingReminderListName)
         }
     }
-    
+
     @Published var showRemindersWithDueDateOnTop: Bool = {
-        return defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showRemindersWithDueDateOnTop)
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showRemindersWithDueDateOnTop)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                showRemindersWithDueDateOnTop,
-                forKey: PreferencesKeys.showRemindersWithDueDateOnTop
-            )
+            Self.defaults.set(showRemindersWithDueDateOnTop, forKey: PreferencesKeys.showRemindersWithDueDateOnTop)
         }
     }
-    
+
     @Published var sortRemindersByFlagAndPriority: Bool = {
-        return defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.sortRemindersByFlagAndPriority)
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.sortRemindersByFlagAndPriority)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                sortRemindersByFlagAndPriority,
-                forKey: PreferencesKeys.sortRemindersByFlagAndPriority
-            )
-        }
-    }
-    
-    @Published var showExternalLinksInReminderItem: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.showExternalLinksInReminderItem)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(
-                showExternalLinksInReminderItem,
-                forKey: PreferencesKeys.showExternalLinksInReminderItem
-            )
+            Self.defaults.set(sortRemindersByFlagAndPriority, forKey: PreferencesKeys.sortRemindersByFlagAndPriority)
         }
     }
 
     @Published var showNotesInReminderItem: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.showNotesInReminderItem)
+        defaults.bool(forKey: PreferencesKeys.showNotesInReminderItem)
     }() {
         didSet {
-            UserPreferences.defaults.set(showNotesInReminderItem, forKey: PreferencesKeys.showNotesInReminderItem)
+            Self.defaults.set(showNotesInReminderItem, forKey: PreferencesKeys.showNotesInReminderItem)
         }
     }
-    
-    @Published var completionAnimationEnabled: Bool = {
-        return defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.completionAnimationEnabled)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(completionAnimationEnabled, forKey: PreferencesKeys.completionAnimationEnabled)
-        }
-    }
-    
+
     @Published var reminderSortingOrder: RmbSortingOrder = {
-        guard let sortingData = defaults.data(forKey: PreferencesKeys.reminderSortingOrder),
-              let sorting = try? JSONDecoder().decode(RmbSortingOrder.self, from: sortingData) else {
+        guard let data = defaults.data(forKey: PreferencesKeys.reminderSortingOrder),
+              let sorting = try? JSONDecoder().decode(RmbSortingOrder.self, from: data) else {
             return .newestFirst
         }
         return sorting
     }() {
         didSet {
-            let sortingData = try? JSONEncoder().encode(reminderSortingOrder)
-            UserPreferences.defaults.set(sortingData, forKey: PreferencesKeys.reminderSortingOrder)
+            let data = try? JSONEncoder().encode(reminderSortingOrder)
+            Self.defaults.set(data, forKey: PreferencesKeys.reminderSortingOrder)
         }
     }
-    
+
     var atLeastOneFilterIsSelected: Bool {
-        return
-            showUpcomingReminders ||
-            preferredCalendarIdentifiersFilter == nil ||
-            !(preferredCalendarIdentifiersFilter ?? []).isEmpty ||
-            !(preferredTagsFilter ?? []).isEmpty
-    }
-
-    var preferredTagsFilter: [String]? {
-        get {
-            return UserPreferences.defaults.stringArray(forKey: PreferencesKeys.tagsFilter)
-        }
-        set {
-            UserPreferences.defaults.set(newValue, forKey: PreferencesKeys.tagsFilter)
-        }
-    }
-
-    @Published var showTagsBeforeCalendars: Bool = {
-        return defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showTagsBeforeCalendars)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(showTagsBeforeCalendars, forKey: PreferencesKeys.showTagsBeforeCalendars)
-        }
-    }
-
-    @Published var filterTagRemindersByCalendar: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.filterTagRemindersByCalendar)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(
-                filterTagRemindersByCalendar,
-                forKey: PreferencesKeys.filterTagRemindersByCalendar
-            )
-        }
+        showUpcomingReminders ||
+        preferredCalendarIdentifiersFilter == nil ||
+        !(preferredCalendarIdentifiersFilter ?? []).isEmpty
     }
 
     @Published var rmbColorScheme: RmbColorScheme = {
-        guard let rmbColorSchemeString = defaults.string(forKey: PreferencesKeys.rmbColorScheme) else {
+        guard let str = defaults.string(forKey: PreferencesKeys.rmbColorScheme) else {
             return .system
         }
-        return RmbColorScheme(rawValue: rmbColorSchemeString) ?? .system
+        return RmbColorScheme(rawValue: str) ?? .system
     }() {
         didSet {
-            UserPreferences.defaults.set(rmbColorScheme.rawValue, forKey: PreferencesKeys.rmbColorScheme)
+            Self.defaults.set(rmbColorScheme.rawValue, forKey: PreferencesKeys.rmbColorScheme)
         }
     }
 
     @Published var reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
 
     @Published var preferTransparentBackground: Bool = {
-        return defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.preferTransparentBackground)
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.preferTransparentBackground)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                preferTransparentBackground,
-                forKey: PreferencesKeys.preferTransparentBackground
-            )
+            Self.defaults.set(preferTransparentBackground, forKey: PreferencesKeys.preferTransparentBackground)
         }
     }
 
     var isTransparencyEnabled: Bool {
         preferTransparentBackground && !reduceTransparency
     }
-    
+
     @Published var menuBarCounterType: RmbMenuBarCounterType = {
-        guard let counterTypeData = defaults.data(forKey: PreferencesKeys.menuBarCounterType),
-              let counterType = try? JSONDecoder().decode(RmbMenuBarCounterType.self, from: counterTypeData) else {
+        guard let data = defaults.data(forKey: PreferencesKeys.menuBarCounterType),
+              let counterType = try? JSONDecoder().decode(RmbMenuBarCounterType.self, from: data) else {
             return .today
         }
         return counterType
     }() {
         didSet {
-            let counterTypeData = try? JSONEncoder().encode(menuBarCounterType)
-            UserPreferences.defaults.set(counterTypeData, forKey: PreferencesKeys.menuBarCounterType)
+            let data = try? JSONEncoder().encode(menuBarCounterType)
+            Self.defaults.set(data, forKey: PreferencesKeys.menuBarCounterType)
         }
     }
-    
+
     @Published var filterMenuBarContentByCalendar: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.filterMenuBarContentByCalendar)
+        defaults.bool(forKey: PreferencesKeys.filterMenuBarContentByCalendar)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                filterMenuBarContentByCalendar,
-                forKey: PreferencesKeys.filterMenuBarContentByCalendar
-            )
+            Self.defaults.set(filterMenuBarContentByCalendar, forKey: PreferencesKeys.filterMenuBarContentByCalendar)
         }
     }
-    
+
     @Published var hideMenuBarIconWhenContentIsShown: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.hideMenuBarIconWhenContentIsShown)
+        defaults.bool(forKey: PreferencesKeys.hideMenuBarIconWhenContentIsShown)
     }() {
         didSet {
-            UserPreferences.defaults.set(
-                hideMenuBarIconWhenContentIsShown,
-                forKey: PreferencesKeys.hideMenuBarIconWhenContentIsShown
-            )
-        }
-    }
-
-    @Published var menuBarReminderPreviewEnabled: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.menuBarReminderPreviewEnabled)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(
-                menuBarReminderPreviewEnabled,
-                forKey: PreferencesKeys.menuBarReminderPreviewEnabled
-            )
-        }
-    }
-
-    @Published var menuBarReminderPreviewTimeAhead: RmbMenuBarPreviewTimeAhead = {
-        guard let data = defaults.data(forKey: PreferencesKeys.menuBarReminderPreviewTimeAhead),
-              let timeAhead = try? JSONDecoder().decode(RmbMenuBarPreviewTimeAhead.self, from: data) else {
-            return .fifteenMinutes
-        }
-        return timeAhead
-    }() {
-        didSet {
-            let data = try? JSONEncoder().encode(menuBarReminderPreviewTimeAhead)
-            UserPreferences.defaults.set(data, forKey: PreferencesKeys.menuBarReminderPreviewTimeAhead)
-        }
-    }
-
-    @Published var menuBarReminderPreviewMaxLength: Int = {
-        let value = defaults.integer(forKey: PreferencesKeys.menuBarReminderPreviewMaxLength)
-        return value > 0 ? value : 10
-    }() {
-        didSet {
-            UserPreferences.defaults.set(
-                menuBarReminderPreviewMaxLength,
-                forKey: PreferencesKeys.menuBarReminderPreviewMaxLength
-            )
-        }
-    }
-
-    @Published var hideCounterWhenReminderPreviewIsShown: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.hideCounterWhenReminderPreviewIsShown)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(
-                hideCounterWhenReminderPreviewIsShown,
-                forKey: PreferencesKeys.hideCounterWhenReminderPreviewIsShown
-            )
-        }
-    }
-
-    @Published var menuBarReminderPreviewShowTodayReminders: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.menuBarReminderPreviewShowTodayReminders)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(
-                menuBarReminderPreviewShowTodayReminders,
-                forKey: PreferencesKeys.menuBarReminderPreviewShowTodayReminders
-            )
-        }
-    }
-
-    @Published var copyPropertyOptions: [CopyPropertyOption] = {
-        guard let data = defaults.data(forKey: PreferencesKeys.copyProperties),
-              let decoded = try? JSONDecoder().decode([CopyPropertyOption].self, from: data) else {
-            return CopyProperty.defaultOptions
-        }
-        return CopyProperty.reconciledOptions(from: decoded)
-    }() {
-        didSet {
-            let data = try? JSONEncoder().encode(copyPropertyOptions)
-            UserPreferences.defaults.set(data, forKey: PreferencesKeys.copyProperties)
-        }
-    }
-
-    @Published var copyIncludePropertyNames: Bool = {
-        return defaults.bool(forKey: PreferencesKeys.copyIncludePropertyNames)
-    }() {
-        didSet {
-            UserPreferences.defaults.set(copyIncludePropertyNames, forKey: PreferencesKeys.copyIncludePropertyNames)
+            Self.defaults.set(hideMenuBarIconWhenContentIsShown, forKey: PreferencesKeys.hideMenuBarIconWhenContentIsShown)
+            Task { @MainActor in
+                AppDelegate.shared?.refreshMenuBarAppearance()
+            }
         }
     }
 
     @Published var preferredLanguage: String? = {
-        return defaults.string(forKey: PreferencesKeys.preferredLanguage)
+        defaults.string(forKey: PreferencesKeys.preferredLanguage)
     }() {
         didSet {
-            UserPreferences.defaults.set(preferredLanguage, forKey: PreferencesKeys.preferredLanguage)
+            Self.defaults.set(preferredLanguage, forKey: PreferencesKeys.preferredLanguage)
         }
     }
 
     @Published var timeFormatIs24Hour: Bool = {
         guard defaults.object(forKey: PreferencesKeys.timeFormatIs24Hour) != nil else {
-            // NOTE: "j" resolves to the locale's preferred hour format; containing "a" indicates 12-hour cycle
-            return DateFormatter
-                .dateFormat(fromTemplate: "j", options: 0, locale: Locale.current)?
-                .contains("a") == false
+            return true
         }
         return defaults.bool(forKey: PreferencesKeys.timeFormatIs24Hour)
     }() {
         didSet {
-            UserPreferences.defaults.set(timeFormatIs24Hour, forKey: PreferencesKeys.timeFormatIs24Hour)
+            Self.defaults.set(timeFormatIs24Hour, forKey: PreferencesKeys.timeFormatIs24Hour)
         }
     }
 
@@ -432,22 +252,162 @@ class UserPreferences: ObservableObject {
         return (1...7).contains(weekday) ? weekday : nil
     }() {
         didSet {
-            UserPreferences.defaults.set(firstWeekday, forKey: PreferencesKeys.firstWeekday)
+            Self.defaults.set(firstWeekday, forKey: PreferencesKeys.firstWeekday)
         }
     }
 
-    // This is intentionally not @Published; it is used for persistence and for driving the NSPopover size directly.
-    var mainPopoverSize: NSSize {
+    @Published var clipboardMaxItems: Int = {
+        let val = defaults.integer(forKey: PreferencesKeys.clipboardMaxItems)
+        return val > 0 ? val : 80
+    }() {
+        didSet {
+            Self.defaults.set(clipboardMaxItems, forKey: PreferencesKeys.clipboardMaxItems)
+        }
+    }
+
+    @Published var defaultNoteColorTag: NoteColorTag = {
+        guard let raw = defaults.string(forKey: PreferencesKeys.defaultNoteColorTag),
+              let tag = NoteColorTag(rawValue: raw) else {
+            return .yellow
+        }
+        return tag
+    }() {
+        didSet {
+            Self.defaults.set(defaultNoteColorTag.rawValue, forKey: PreferencesKeys.defaultNoteColorTag)
+        }
+    }
+
+    @Published var isNoteMarkdownEnabled: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.isNoteMarkdownEnabled)
+    }() {
+        didSet {
+            Self.defaults.set(isNoteMarkdownEnabled, forKey: PreferencesKeys.isNoteMarkdownEnabled)
+        }
+    }
+
+    // MARK: - Pomodoro Preferences
+
+    @Published var pomodoroFocusMinutes: Int = {
+        let val = defaults.integer(forKey: PreferencesKeys.pomodoroFocusMinutes)
+        return val > 0 ? val : 25
+    }() {
+        didSet {
+            Self.defaults.set(pomodoroFocusMinutes, forKey: PreferencesKeys.pomodoroFocusMinutes)
+        }
+    }
+
+    @Published var pomodoroShortBreakMinutes: Int = {
+        let val = defaults.integer(forKey: PreferencesKeys.pomodoroShortBreakMinutes)
+        return val > 0 ? val : 5
+    }() {
+        didSet {
+            Self.defaults.set(pomodoroShortBreakMinutes, forKey: PreferencesKeys.pomodoroShortBreakMinutes)
+        }
+    }
+
+    @Published var pomodoroLongBreakMinutes: Int = {
+        let val = defaults.integer(forKey: PreferencesKeys.pomodoroLongBreakMinutes)
+        return val > 0 ? val : 15
+    }() {
+        didSet {
+            Self.defaults.set(pomodoroLongBreakMinutes, forKey: PreferencesKeys.pomodoroLongBreakMinutes)
+        }
+    }
+
+    @Published var pomodoroSoundEnabled: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.pomodoroSoundEnabled)
+    }() {
+        didSet {
+            Self.defaults.set(pomodoroSoundEnabled, forKey: PreferencesKeys.pomodoroSoundEnabled)
+        }
+    }
+
+    @Published var pomodoroShowInMenuBar: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.pomodoroShowInMenuBar)
+    }() {
+        didSet {
+            Self.defaults.set(pomodoroShowInMenuBar, forKey: PreferencesKeys.pomodoroShowInMenuBar)
+        }
+    }
+
+    var pomodoroCompletedTodayDate: String? {
+        get { Self.defaults.string(forKey: PreferencesKeys.pomodoroCompletedTodayDate) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.pomodoroCompletedTodayDate) }
+    }
+
+    var pomodoroCompletedTodayCount: Int {
+        get { Self.defaults.integer(forKey: PreferencesKeys.pomodoroCompletedTodayCount) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.pomodoroCompletedTodayCount) }
+    }
+
+    // MARK: - Pinned Board Persistence
+
+    var pinnedReminderIds: [String] {
+        get { Self.defaults.stringArray(forKey: PreferencesKeys.pinnedReminderIds) ?? [] }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.pinnedReminderIds) }
+    }
+
+    var pinnedSchedules: [String: PinnedTaskSchedule] {
         get {
-            guard let nsSizeData = UserPreferences.defaults.data(forKey: PreferencesKeys.mainPopoverSize),
-                  let nsSize = try? JSONDecoder().decode(NSSize.self, from: nsSizeData) else {
-                return MainPopoverSizing.defaultSize
+            guard let data = Self.defaults.data(forKey: PreferencesKeys.pinnedSchedules),
+                  let dict = try? JSONDecoder().decode([String: PinnedTaskSchedule].self, from: data) else {
+                return [:]
             }
-            return nsSize
+            return dict
         }
         set {
-            let nsSizeData = try? JSONEncoder().encode(newValue)
-            UserPreferences.defaults.set(nsSizeData, forKey: PreferencesKeys.mainPopoverSize)
+            let data = try? JSONEncoder().encode(newValue)
+            Self.defaults.set(data, forKey: PreferencesKeys.pinnedSchedules)
+        }
+    }
+
+    var pinnedPanelFrame: NSRect? {
+        get {
+            guard let data = Self.defaults.data(forKey: PreferencesKeys.pinnedPanelFrame),
+                  let rect = try? JSONDecoder().decode(NSRect.self, from: data) else {
+                return nil
+            }
+            return rect
+        }
+        set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) {
+                Self.defaults.set(data, forKey: PreferencesKeys.pinnedPanelFrame)
+            } else {
+                Self.defaults.removeObject(forKey: PreferencesKeys.pinnedPanelFrame)
+            }
+        }
+    }
+
+    var isPinnedPanelVisible: Bool {
+        get { Self.defaults.bool(forKey: PreferencesKeys.isPinnedPanelVisible) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.isPinnedPanelVisible) }
+    }
+
+    var isPinnedPanelCollapsed: Bool {
+        get { Self.defaults.bool(forKey: PreferencesKeys.isPinnedPanelCollapsed) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.isPinnedPanelCollapsed) }
+    }
+
+    @Published var isBoardAlwaysOnTop: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.isBoardAlwaysOnTop)
+    }() {
+        didSet {
+            Self.defaults.set(isBoardAlwaysOnTop, forKey: PreferencesKeys.isBoardAlwaysOnTop)
+            Task { @MainActor in
+                PinnedPanelController.shared.syncWindowLevelFromPreferences()
+            }
+        }
+    }
+
+    @Published var completedTimeRange: CompletedTimeRange = {
+        guard let raw = defaults.string(forKey: PreferencesKeys.completedTimeRange),
+              let range = CompletedTimeRange(rawValue: raw) else {
+            return .today
+        }
+        return range
+    }() {
+        didSet {
+            Self.defaults.set(completedTimeRange.rawValue, forKey: PreferencesKeys.completedTimeRange)
         }
     }
 }

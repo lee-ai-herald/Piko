@@ -3,55 +3,88 @@ import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
     static let openRemindersMenuBar = Self("OpenRemindersMenuBar", initial: .init(.r, modifiers: [.command, .option]))
+    static let openClipboardHistory = Self("OpenClipboardHistory", initial: .init(.v, modifiers: [.command, .shift]))
+    static let openQuickNotes = Self("OpenQuickNotes", initial: .init(.n, modifiers: [.command, .option]))
+    static let toggleCornerMiniWindow = Self("ToggleCornerMiniWindow", initial: .init(.m, modifiers: [.command, .option]))
 }
 
 private enum ShortcutsKeys {
     static let isOpenRemindersMenuBarEnabled = "isOpenRemindersMenuBarEnabled"
+    static let isOpenClipboardHistoryEnabled = "isOpenClipboardHistoryEnabled"
+    static let isOpenQuickNotesEnabled = "isOpenQuickNotesEnabled"
+    static let isToggleCornerMiniWindowEnabled = "isToggleCornerMiniWindowEnabled"
 }
 
 @MainActor
 class KeyboardShortcutService: ObservableObject {
     static let shared = KeyboardShortcutService()
-    
-    private init() {
-        // This prevents others from using the default '()' initializer for this class.
-    }
-    
+
+    private init() {}
+
     private static let defaults = UserDefaults.standard
-    
+
     @Published var isOpenRemindersMenuBarEnabled: Bool = {
-        return defaults.bool(forKey: ShortcutsKeys.isOpenRemindersMenuBarEnabled)
+        defaults.boolWithDefaultValueTrue(forKey: ShortcutsKeys.isOpenRemindersMenuBarEnabled)
     }() {
         didSet {
-            KeyboardShortcutService.defaults.set(
-                isOpenRemindersMenuBarEnabled,
-                forKey: ShortcutsKeys.isOpenRemindersMenuBarEnabled
-            )
+            Self.defaults.set(isOpenRemindersMenuBarEnabled, forKey: ShortcutsKeys.isOpenRemindersMenuBarEnabled)
             setEnabled(isOpenRemindersMenuBarEnabled, for: .openRemindersMenuBar)
         }
     }
-    
+
+    @Published var isOpenClipboardHistoryEnabled: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: ShortcutsKeys.isOpenClipboardHistoryEnabled)
+    }() {
+        didSet {
+            Self.defaults.set(isOpenClipboardHistoryEnabled, forKey: ShortcutsKeys.isOpenClipboardHistoryEnabled)
+            setEnabled(isOpenClipboardHistoryEnabled, for: .openClipboardHistory)
+        }
+    }
+
+    @Published var isOpenQuickNotesEnabled: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: ShortcutsKeys.isOpenQuickNotesEnabled)
+    }() {
+        didSet {
+            Self.defaults.set(isOpenQuickNotesEnabled, forKey: ShortcutsKeys.isOpenQuickNotesEnabled)
+            setEnabled(isOpenQuickNotesEnabled, for: .openQuickNotes)
+        }
+    }
+
+    @Published var isToggleCornerMiniWindowEnabled: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: ShortcutsKeys.isToggleCornerMiniWindowEnabled)
+    }() {
+        didSet {
+            Self.defaults.set(isToggleCornerMiniWindowEnabled, forKey: ShortcutsKeys.isToggleCornerMiniWindowEnabled)
+            setEnabled(isToggleCornerMiniWindowEnabled, for: .toggleCornerMiniWindow)
+        }
+    }
+
     func action(for shortcutName: KeyboardShortcuts.Name, action: @escaping () -> Void) {
         KeyboardShortcuts.onKeyDown(for: shortcutName) {
             action()
         }
-        let isEnabled = isEnabled(shortcutName)
-        setEnabled(isEnabled, for: shortcutName)
+        setEnabled(isEnabled(shortcutName), for: shortcutName)
     }
-    
+
     func reset(_ shortcutName: KeyboardShortcuts.Name) {
         KeyboardShortcuts.reset(shortcutName)
     }
-    
+
     private func isEnabled(_ shortcutName: KeyboardShortcuts.Name) -> Bool {
         switch shortcutName {
         case .openRemindersMenuBar:
             return isOpenRemindersMenuBarEnabled
+        case .openClipboardHistory:
+            return isOpenClipboardHistoryEnabled
+        case .openQuickNotes:
+            return isOpenQuickNotesEnabled
+        case .toggleCornerMiniWindow:
+            return isToggleCornerMiniWindowEnabled
         default:
             return false
         }
     }
-    
+
     private func setEnabled(_ isEnabled: Bool, for shortcutName: KeyboardShortcuts.Name) {
         if isEnabled {
             KeyboardShortcuts.enable(shortcutName)

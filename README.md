@@ -1,92 +1,42 @@
 <div align="center">
   <img
-    src="docs/images/reminders-icon.png"
-    alt="Reminders MenuBar"
+    src="docs/images/piko-icon.png"
+    alt="Piko"
+    width="128"
   >
   <h1>
-    Reminders MenuBar
+    Piko
   </h1>
   <p>
-    Simple macOS menu bar app to view and interact with reminders.
-  </p>
-  <p>
-    <a href="#features">Features</a> •
-    <a href="#installation">Installation</a> •
-    <a href="#permission-request">Permission Request</a> •
-    <a href="#contributing">Contributing</a> •
-    <a href="#languages">Languages</a> •
-    <a href="#license">License</a>
+    轻巧随手的 macOS 桌面悬浮工作台 —— 集任务规划板、番茄钟、剪贴板历史、富文本/Markdown 随笔与右上角迷你小窗于一体。
   </p>
 </div>
 
-<div align="center">
-  <img
-    max-width="400"
-    width="45%"
-    src="docs/images/reminder-menubar-light.png"
-    alt="Reminders MenuBar in light mode"
-  >
-  <img
-    max-width="400"
-    width="45%"
-    src="docs/images/reminder-menubar-dark.png"
-    alt="Reminders MenuBar in dark mode"
-  >
-</div>
+## 核心模块
 
-## Features
+* **规划板**：双向同步 Apple 提醒事项，支持周/月/年日程排期、当日时间轴拖拽、跨栏即时完成与撤回、已完成时间筛选
+* **番茄钟**：专注与长短休息倒计时，支持绑定规划板任务、顶部菜单栏实时倒计时与今日专注统计
+* **剪贴板**：自动记录文字与图片历史，支持搜索、收藏置顶与一键回填
+* **随笔**：支持富文本快捷样式与所写即所见 Markdown 实时排版，选中文本可一键发送到规划板
+* **右上角迷你小窗**：按 `⌥⌘M` 或点击顶栏按钮一键收拢至屏幕右上角，四模块无缝切换
 
-* All interactions through the macOS menu bar
-* Keep everything in sync with Apple Reminders
-* Create new reminders using natural language for due dates, lists, and tags
-* Mark as completed or edit due dates, priorities, recurrences, lists, tags, and more
-* View upcoming reminders with a configurable time interval
-* Search across all your reminders
-* Filter reminders through lists and tags
-* Customize the menu bar with icon, counter, or next upcoming reminder
-* Toggle the app with a global keyboard shortcut
+## 构建与打包
 
-<div align="center">
-  <img
-    src="docs/images/reminders-menubar-demo.gif"
-    alt="Reminders MenuBar demo"
-  >
-</div>
-
-## Installation
-
-*Reminders MenuBar requires macOS Monterey 12 or later.*
-
-### Homebrew
-
-Reminders MenuBar can be installed using [Homebrew](https://brew.sh).
+需要 macOS 12+ 与 Xcode Command Line Tools：
 
 ```bash
-brew install --cask reminders-menubar
+python3 scripts/build_app.py
 ```
 
-### Direct Download
+构建产物位于 `build/Piko.app`。
 
-Direct downloads are available on the [releases page](https://github.com/DamascenoRafael/reminders-menubar/releases):
+## 权限说明
 
-* Disk image (`.dmg`): double-click to open, then drag the app to *Applications*
-* Zip archive (`.zip`): extract and drag the app to *Applications*
+Piko 通过系统 [EKEventStore](https://developer.apple.com/documentation/eventkit/ekeventstore) 同步 Apple 提醒事项数据（支持 iCloud 同步）。首次使用时需在 *系统设置 > 隐私与安全性 > 提醒事项* 中授予权限。
 
-## Permission Request
+## 致谢与协议
 
-Reminders MenuBar uses [EKEventStore](https://developer.apple.com/documentation/eventkit/ekeventstore) to access reminders on macOS (which are available in Apple Reminders and can be synced through iCloud). On first use, the app should request permission to access reminders as shown in the image below. Also, in *System Settings > Privacy & Security > Reminders* it is possible to manage this permission. [Click here if you are using *OpenCore Legacy Patcher*](docs/fix-for-opencore-legacy-patcher.md).
-
-<div>
-  <img
-    width="250"
-    src="docs/images/reminders-permission.png"
-    alt="macOS window asking permission for Reminders MenuBar to access reminders"
-  >
-</div>
-
-## Contributing
-
-Feel free to share, open issues and contribute to this project! :heart:
+本项目最初基于 [reminders-menubar](https://github.com/DamascenoRafael/reminders-menubar) 二次演进，遵循 GNU General Public License v3 协议。
 
 ## Languages
 

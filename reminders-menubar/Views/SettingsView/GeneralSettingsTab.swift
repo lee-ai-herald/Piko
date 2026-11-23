@@ -5,132 +5,102 @@ struct GeneralSettingsTab: View {
     @ObservedObject private var launchAtLoginService = LaunchAtLoginService.shared
 
     var body: some View {
-        Form {
-            SettingsSection {
-                Toggle(
-                    rmbLocalized(.launchAtLoginOption),
-                    isOn: Binding(
-                        get: { launchAtLoginService.isEnabled },
-                        set: { launchAtLoginService.setEnabled($0) }
-                    )
-                )
-                .disabled(launchAtLoginService.status == .unavailable)
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingsPageHeader(title: "通用")
 
-                launchAtLoginStatusNote
-            }
-
-            SettingsDivider()
-
-            SettingsSection(rmbLocalized(.appColorSchemeSettingsLabel)) {
-                Picker(String(""), selection: $userPreferences.rmbColorScheme) {
-                    Text(RmbColorScheme.system.title).tag(RmbColorScheme.system)
-                    Divider()
-                    Text(RmbColorScheme.light.title).tag(RmbColorScheme.light)
-                    Text(RmbColorScheme.dark.title).tag(RmbColorScheme.dark)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-
-                Toggle(
-                    rmbLocalized(.appAppearanceReduceTransparencyOption),
-                    isOn: Binding(
-                        get: { !userPreferences.preferTransparentBackground || userPreferences.reduceTransparency },
-                        set: { userPreferences.preferTransparentBackground = !$0 }
-                    )
-                )
-                .disabled(userPreferences.reduceTransparency)
-            }
-
-            SettingsDivider()
-
-            SettingsSection(rmbLocalized(.popoverSizeSettingsLabel)) {
-                Button(action: {
-                    let defaultSize = MainPopoverSizing.defaultSize
-                    AppDelegate.shared.setMainPopoverSize(size: defaultSize, persist: true)
-                }) {
-                    Text(rmbLocalized(.popoverSizeResetToDefaultButton))
-                }
-            }
-
-            SettingsDivider()
-
-            SettingsSection(rmbLocalized(.preferredLanguageSettingsLabel)) {
-                Picker(String(""), selection: Binding(
-                    get: { userPreferences.preferredLanguage ?? "" },
-                    set: { newValue in
-                        userPreferences.preferredLanguage = newValue.isEmpty ? nil : newValue
+                SettingsCard(title: "启动与窗口") {
+                    SettingsRow("开机启动") {
+                        Toggle("", isOn: Binding(
+                            get: { launchAtLoginService.isEnabled },
+                            set: { launchAtLoginService.setEnabled($0) }
+                        ))
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .labelsHidden()
+                        .disabled(launchAtLoginService.status == .unavailable)
                     }
-                )) {
-                    Text(rmbLocalized(.preferredLanguageSystemSettingsOption))
-                        .tag("")
-                    Divider()
-                    ForEach(rmbAvailableLocales(), id: \.identifier) { locale in
-                        Text(locale.name)
-                            .tag(locale.identifier)
+
+                    SettingsRow(
+                        "窗口置顶",
+                        subtitle: "始终悬浮于其他窗口上方",
+                        showDivider: false
+                    ) {
+                        Toggle("", isOn: $userPreferences.isBoardAlwaysOnTop)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
 
-            SettingsSection(rmbLocalized(.timeFormatSettingsLabel)) {
-                Picker(String(""), selection: $userPreferences.timeFormatIs24Hour) {
-                    Text(rmbLocalized(.timeFormat12HourOption)).tag(false)
-                    Text(rmbLocalized(.timeFormat24HourOption)).tag(true)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
+                SettingsCard(title: "外观") {
+                    SettingsRow("外观主题") {
+                        Picker("", selection: $userPreferences.rmbColorScheme) {
+                            ForEach(RmbColorScheme.allCases, id: \.self) { scheme in
+                                Text(scheme.title).tag(scheme)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                        .labelsHidden()
+                        .frame(width: 196)
+                    }
 
-            SettingsSection(rmbLocalized(.firstWeekdaySettingsLabel)) {
-                Picker(String(""), selection: $userPreferences.firstWeekday) {
-                    Text(rmbLocalized(.firstWeekdaySystemOption)).tag(Int?.none)
-                    Divider()
-                    ForEach(Array(rmbWeekdaySymbols().enumerated()), id: \.element) { index, weekday in
-                        Text(weekday).tag(Optional(index + 1))
+                    SettingsRow(
+                        "半透明背景",
+                        subtitle: userPreferences.reduceTransparency ? "受系统「降低透明度」设置限制" : nil
+                    ) {
+                        Toggle("", isOn: $userPreferences.preferTransparentBackground)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                            .disabled(userPreferences.reduceTransparency)
+                    }
+
+                    SettingsRow("卡片显示备注", showDivider: false) {
+                        Toggle("", isOn: $userPreferences.showNotesInReminderItem)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
 
-            SettingsDivider()
+                SettingsCard(title: "菜单栏") {
+                    SettingsRow("待办计数") {
+                        Picker("", selection: $userPreferences.menuBarCounterType) {
+                            ForEach(RmbMenuBarCounterType.allCases, id: \.self) { counterType in
+                                Text(counterType.title).tag(counterType)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .labelsHidden()
+                        .frame(width: 126)
+                    }
 
-            SettingsSection {
-                Button(rmbLocalized(.reloadRemindersDataButton)) {
-                    NotificationCenter.default.post(name: .remindersDataShouldUpdate, object: nil)
+                    SettingsRow("显示番茄倒计时") {
+                        Toggle("", isOn: $userPreferences.pomodoroShowInMenuBar)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                    }
+
+                    SettingsRow(
+                        "有内容时隐藏图标",
+                        subtitle: "显示计数或倒计时时自动隐藏",
+                        showDivider: false
+                    ) {
+                        Toggle("", isOn: $userPreferences.hideMenuBarIconWhenContentIsShown)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                    }
                 }
             }
+            .padding(20)
         }
-        .padding(20)
         .onAppear {
             launchAtLoginService.refresh()
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            launchAtLoginService.refresh()
-        }
     }
-
-    @ViewBuilder private var launchAtLoginStatusNote: some View {
-        switch launchAtLoginService.status {
-        case .requiresApproval:
-            Text(rmbLocalized(.launchAtLoginApprovalRequiredNote))
-                .modifier(SettingsNoteStyle())
-
-            if #available(macOS 13.0, *) {
-                Button(rmbLocalized(.openLoginItemsSettingsButton)) {
-                    launchAtLoginService.openSystemSettings()
-                }
-            }
-        case .unavailable:
-            Text(rmbLocalized(.launchAtLoginUnavailableNote))
-                .modifier(SettingsNoteStyle())
-        case .enabled, .disabled:
-            EmptyView()
-        }
-    }
-}
-
-#Preview {
-    GeneralSettingsTab()
 }

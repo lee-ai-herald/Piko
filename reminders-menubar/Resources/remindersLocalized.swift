@@ -199,6 +199,22 @@ enum RemindersMenuBarLocalizedKeys: String {
     case showTagsBeforeCalendarsOption
     case filterTagRemindersByCalendarOption
     case tagRemindersFilterByCalendarEnabledHelp
+    case pinReminderToDesktopButton
+    case unpinReminderFromDesktopButton
+    case pinnedRemindersButtonHelp
+    case pinnedRemindersPanelTitle
+    case pinnedRemindersEmptyTitle
+    case pinnedRemindersEmptyMessage
+    case pinnedPanelLevelFloatingLabel
+    case pinnedPanelLevelDesktopLabel
+    case pinnedPanelSwitchToDesktopHelp
+    case pinnedPanelSwitchToFloatingHelp
+    case pinnedPanelCollapseHelp
+    case pinnedPanelExpandHelp
+    case pinnedPanelHideHelp
+    case pinnedPanelUnpinAllButton
+    case showPinnedRemindersMenuButton
+    case hidePinnedRemindersMenuButton
 }
 
 struct ReminderMenuBarLocale {

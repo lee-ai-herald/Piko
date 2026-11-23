@@ -91,3 +91,10 @@ iOSInjectionProject/
 
 # macOS folder metadata
 .DS_Store
+
+# CommandLineTools SwiftPM build wrapper generated sources
+scripts/build-wrapper/Sources/
+
+# Local promo video workspace
+promo-video/
+

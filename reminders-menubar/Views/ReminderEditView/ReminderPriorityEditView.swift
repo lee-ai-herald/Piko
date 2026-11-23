@@ -4,43 +4,62 @@ import EventKit
 struct ReminderPriorityEditView: View {
     @Binding var priority: EKReminderPriority
 
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(rmbSymbol: .priorityHigh)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .frame(width: 20)
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
 
-            priorityButton(for: .none)
-            priorityButton(for: .low)
-            priorityButton(for: .medium)
-            priorityButton(for: .high)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("优先级象限")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(EKReminderPriority.allQuadrants, id: \.rawValue) { quadrant in
+                    quadrantButton(for: quadrant)
+                }
+            }
         }
     }
 
     @ViewBuilder
-    private func priorityButton(for priority: EKReminderPriority) -> some View {
-        let isSelected = self.priority == priority
+    private func quadrantButton(for quadrant: EKReminderPriority) -> some View {
+        let isSelected = priority == quadrant
+        let color = quadrant.quadrantColor
 
         Button {
-            self.priority = priority
+            priority = quadrant
         } label: {
-            HStack {
-                if let symbol = priority.rmbSymbol {
-                    Image(rmbSymbol: symbol)
-                }
-                Text(priority.title)
-            }
-            .font(.system(size: 11))
-            .frame(height: 20)
-            .padding(.horizontal, 8)
-        }
-        .buttonStyle(.borderless)
-        .background(isSelected ? Color.rmbColor(.prioritySelectedBackground) : Color.secondary.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-}
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
 
-#Preview {
-    ReminderPriorityEditView(priority: .constant(.medium))
+                Text(quadrant.title)
+                    .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(isSelected ? .primary : .secondary)
+
+                Spacer(minLength: 0)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(color)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isSelected ? color.opacity(0.16) : Color.primary.opacity(0.045))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(isSelected ? color.opacity(0.65) : Color.primary.opacity(0.07), lineWidth: isSelected ? 1.2 : 0.75)
+            )
+        }
+        .buttonStyle(.plain)
+    }
 }

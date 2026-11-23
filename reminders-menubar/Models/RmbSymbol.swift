@@ -34,6 +34,15 @@ enum RmbSymbol {
     case hashtag
     case pencil
     case pin
+    case pinFill
+    case pinSlash
+    case pipEnter
+    case pipExit
+    case noteText
+    case sparkles
+    case wrenchAndScrewdriver
+    case floatingWindow
+    case desktopWindow
     case plus
     case recurrence
     case safari
@@ -129,6 +138,24 @@ enum RmbSymbol {
             return "pencil"
         case .pin:
             return "pin"
+        case .pinFill:
+            return "pin.fill"
+        case .pinSlash:
+            return "pin.slash"
+        case .pipEnter:
+            return "pip.enter"
+        case .pipExit:
+            return "pip.exit"
+        case .noteText:
+            return "note.text"
+        case .sparkles:
+            return "sparkles"
+        case .wrenchAndScrewdriver:
+            return "wrench.and.screwdriver"
+        case .floatingWindow:
+            return "square.stack.3d.up.fill"
+        case .desktopWindow:
+            return "desktopcomputer"
         case .plus:
             return "plus"
         case .recurrence:

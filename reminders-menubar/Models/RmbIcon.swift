@@ -1,62 +1,64 @@
 import Cocoa
 
 enum RmbIcon: String, CaseIterable {
-    case note1 = "icon-note-1"
-    case note2 = "icon-note-2"
-    case note3 = "icon-note-3"
-    case note4 = "icon-note-4"
-    case note5 = "icon-note-5"
-    case bell1 = "icon-bell-1"
-    case bell2 = "icon-bell-2"
-    case reminder1 = "icon-reminder-1"
-    case reminder2 = "icon-reminder-2"
-    case reminder3 = "icon-reminder-3"
-    case sfsymbols1 = "checklist"
-    case sfsymbols2 = "circle.inset.filled"
-    case smalldot = "icon-small-dot"
-    
+    case pikoCornerCheck = "icon-piko-check"
+
     static var defaultIcon: RmbIcon {
-        return self.note1
+        return .pikoCornerCheck
     }
-    
+
+    private static let cachedCornerCheckImage: NSImage = {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size, flipped: true) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.saveGState()
+            ctx.scaleBy(x: rect.width / 18.0, y: rect.height / 18.0)
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            ctx.setStrokeColor(NSColor.black.cgColor)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+
+            // M7: Open-corner rounded frame with crisp diagonal checkmark at top-right
+            let box = CGMutablePath()
+            box.move(to: CGPoint(x: 9.8, y: 2.5))
+            box.addLine(to: CGPoint(x: 5.5, y: 2.5))
+            box.addArc(center: CGPoint(x: 5.5, y: 5.5), radius: 3.0, startAngle: -.pi / 2, endAngle: .pi, clockwise: true)
+            box.addLine(to: CGPoint(x: 2.5, y: 12.5))
+            box.addArc(center: CGPoint(x: 5.5, y: 12.5), radius: 3.0, startAngle: .pi, endAngle: .pi / 2, clockwise: true)
+            box.addLine(to: CGPoint(x: 12.5, y: 15.5))
+            box.addArc(center: CGPoint(x: 12.5, y: 12.5), radius: 3.0, startAngle: .pi / 2, endAngle: 0, clockwise: true)
+            box.addLine(to: CGPoint(x: 15.5, y: 8.6))
+            ctx.addPath(box)
+            ctx.setLineWidth(1.55)
+            ctx.strokePath()
+
+            let tick = CGMutablePath()
+            tick.move(to: CGPoint(x: 9.5, y: 7.0))
+            tick.addLine(to: CGPoint(x: 11.4, y: 9.0))
+            tick.addLine(to: CGPoint(x: 15.8, y: 3.4))
+            ctx.addPath(tick)
+            ctx.setLineWidth(1.65)
+            ctx.strokePath()
+
+            ctx.restoreGState()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
     var image: NSImage {
-        if let assetImage = NSImage(named: self.rawValue) {
-            return assetImage
+        switch self {
+        case .pikoCornerCheck:
+            return Self.cachedCornerCheckImage
         }
-        if let sfSymbol = NSImage(systemSymbolName: self.rawValue, accessibilityDescription: name) {
-            return sfSymbol
-        }
-        return Self.defaultIcon.image
     }
 
     var name: String {
         switch self {
-        case .note1:
-            return "Note 1"
-        case .note2:
-            return "Note 2"
-        case .note3:
-            return "Note 3"
-        case .note4:
-            return "Note 4"
-        case .note5:
-            return "Note 5"
-        case .bell1:
-            return "Bell 1"
-        case .bell2:
-            return "Bell 2"
-        case .reminder1:
-            return "Reminder 1"
-        case .reminder2:
-            return "Reminder 2"
-        case .reminder3:
-            return "Reminder 3"
-        case .sfsymbols1:
-            return "Checklist"
-        case .sfsymbols2:
-            return "Circle"
-        case .smalldot:
-            return "Small Dot"
+        case .pikoCornerCheck:
+            return "Piko"
         }
     }
 }

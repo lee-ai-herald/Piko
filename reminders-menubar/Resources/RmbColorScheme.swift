@@ -19,11 +19,11 @@ enum RmbColorScheme: String, CaseIterable {
     var title: String {
         switch self {
         case .system:
-            return rmbLocalized(.appAppearanceColorSystemModeOption)
+            return "跟随系统"
         case .light:
-            return rmbLocalized(.appAppearanceColorLightModeOption)
+            return "浅色"
         case .dark:
-            return rmbLocalized(.appAppearanceColorDarkModeOption)
+            return "深色"
         }
     }
 }
