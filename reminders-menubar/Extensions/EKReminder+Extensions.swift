@@ -3,8 +3,14 @@ import EventKit
 extension EKReminder {
     // MARK: - Computed properties
 
+    /// Resolves `dueDateComponents` reliably even when CalDAV/Exchange omits `components.calendar`.
+    var resolvedDueDate: Date? {
+        guard let components = dueDateComponents else { return nil }
+        return components.date ?? Calendar.current.date(from: components)
+    }
+
     private var maxDueDate: Date? {
-        guard let date = dueDateComponents?.date else {
+        guard let date = resolvedDueDate else {
             return nil
         }
 
@@ -12,7 +18,8 @@ extension EKReminder {
             return date
         }
 
-        return Calendar.current.date(byAdding: .day, value: 1, to: date)
+        let start = Calendar.current.startOfDay(for: date)
+        return Calendar.current.date(byAdding: .day, value: 1, to: start)
     }
 
     var hasDueDate: Bool {
@@ -36,50 +43,12 @@ extension EKReminder {
         maxDueDate?.isPast ?? false
     }
 
-    var relativeDateDescription: String? {
-        guard let date = dueDateComponents?.date else {
-            return nil
-        }
-        return date.relativeDateDescription(withTime: hasTime)
-    }
-
-    /// Compact deadline badge text for the desktop timeline board (e.g. "今天截止", "明天截止", "5/12 截止", "已逾期 2 天")
-    var compactDeadlineLabel: String? {
-        guard let dueDate = dueDateComponents?.date else {
-            return nil
-        }
-
-        let cal = Calendar.current
-        let todayStart = cal.startOfDay(for: Date())
-        let dueStart = cal.startOfDay(for: dueDate)
-        let days = cal.dateComponents([.day], from: todayStart, to: dueStart).day ?? 0
-
-        if isExpired {
-            if days < 0 {
-                return "逾期 \(-days) 天"
-            }
-            return "已逾期"
-        }
-
-        switch days {
-        case 0:
-            return "今天截止"
-        case 1:
-            return "明天截止"
-        case 2...6:
-            return "\(days) 天内截止"
-        default:
-            let formatter = DateFormatter()
-            formatter.dateFormat = cal.isDate(dueDate, equalTo: Date(), toGranularity: .year) ? "M/d" : "yy/M/d"
-            return "\(formatter.string(from: dueDate)) 截止"
-        }
-    }
-
     // MARK: - Date and recurrence helpers
 
     func removeDueDateAndAlarms() {
         dueDateComponents = nil
-        alarms?.forEach { alarm in
+        startDateComponents = nil
+        alarms?.filter { $0.absoluteDate != nil }.forEach { alarm in
             removeAlarm(alarm)
         }
     }
@@ -93,8 +62,11 @@ extension EKReminder {
     func addDueDateAndAlarm(for date: Date, withTime hasTime: Bool) {
         let dateComponents = date.dateComponents(withTime: hasTime)
         dueDateComponents = dateComponents
+        if hasRecurrenceRules {
+            startDateComponents = dateComponents
+        }
 
-        if hasTime, let alarmDate = dateComponents.date {
+        if hasTime, let alarmDate = dateComponents.date ?? Calendar.current.date(from: dateComponents) {
             let ekAlarm = EKAlarm(absoluteDate: alarmDate)
             addAlarm(ekAlarm)
         }
@@ -131,8 +103,12 @@ extension EKReminder {
 
     private func performPrivateBoolGetter(_ name: String, on object: AnyObject) -> Bool {
         let selector = NSSelectorFromString(name)
-        guard object.responds(to: selector) else { return false }
-        return object.perform(selector) != nil
+        guard object.responds(to: selector),
+              let nsObj = object as? NSObject,
+              let value = nsObj.value(forKey: name) as? NSNumber else {
+            return false
+        }
+        return value.boolValue
     }
 
     // MARK: - Update reminder

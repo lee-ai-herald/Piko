@@ -18,9 +18,6 @@ struct PikoApp: App {
         Settings {
             SettingsView()
         }
-        .commands {
-            AppCommands()
-        }
     }
 }
 
@@ -30,6 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static private(set) var shared: AppDelegate!
 
     private var sharedAuthorizationErrorMessage: String?
+    private var isPresentingAuthorizationAlert = false
     private var currentMenuBarCount = 0
     private var currentPomodoroText: String?
 
@@ -37,13 +35,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         AppDelegate.shared = self
-        LaunchAtLoginService.shared.migrateIfNeeded()
 
         _ = ClipboardHistoryStore.shared
         _ = QuickNotesStore.shared
 
         configureMenuBarButton()
         configureKeyboardShortcuts()
+        AppUpdateService.shared.startAutomaticCheckSchedule()
 
         if RemindersService.shared.isAuthorized {
             PinnedRemindersStore.shared.launchAndRestore()
@@ -54,6 +52,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ClipboardHistoryStore.shared.stopMonitoring()
+        ClipboardHistoryStore.shared.flushPendingWrites()
+        QuickNotesStore.shared.flushPendingSave()
+        PinnedPanelController.shared.flushPendingFrameSave()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -126,10 +127,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showRightClickMenu() {
+        guard let button = statusBarItem.button else { return }
         let menu = RightClickMenuHelper.shared.buildRightClickMenu()
-        statusBarItem.menu = menu
-        statusBarItem.button?.performClick(nil)
-        statusBarItem.menu = nil
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 5), in: button)
     }
 
     private func openOrToggleBoard(tab: BoardTab?) {
@@ -163,6 +163,10 @@ extension AppDelegate: NSAlertDelegate {
     }
 
     private func presentNoAuthorizationAlert() {
+        guard !isPresentingAuthorizationAlert else { return }
+        isPresentingAuthorizationAlert = true
+        defer { isPresentingAuthorizationAlert = false }
+
         let alert = NSAlert()
         alert.messageText = rmbLocalized(.appNoRemindersAccessAlertMessage, arguments: AppConstants.appName)
         let reasonDescription = rmbLocalized(

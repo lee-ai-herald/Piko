@@ -73,6 +73,7 @@ struct SettingsOpenerView: View {
     @State private var settingsOpenCancellable: AnyCancellable?
     @State private var settingsCloseCancellable: AnyCancellable?
     @State private var settingsWindow: NSWindow?
+    @State private var pendingCancel: (() -> Void)?
 
     var body: some View {
         SettingsOpenerHiddenWindow()
@@ -82,6 +83,10 @@ struct SettingsOpenerView: View {
                 SettingsOpenerBridge.shared.listenerDidAppear()
             }
             .onDisappear {
+                pendingCancel?()
+                pendingCancel = nil
+                settingsOpenCancellable?.cancel()
+                settingsOpenCancellable = nil
                 SettingsOpenerBridge.shared.listenerDidDisappear()
             }
             .onReceive(NotificationCenter.default.publisher(for: .openSettingsRequest)) { _ in
@@ -93,8 +98,11 @@ struct SettingsOpenerView: View {
 
     private func handleOpenSettingsRequest() async {
         // If settings window is already open, just bring it to front.
-        if let existingWindow = settingsWindow, existingWindow.isVisible {
+        if let existingWindow = settingsWindow ?? NSApp.windows.first(where: Self.isSettingsWindow),
+           existingWindow.isVisible {
+            settingsWindow = existingWindow
             NSApp.activate()
+            existingWindow.makeKeyAndOrderFront(nil)
             existingWindow.orderFrontRegardless()
             return
         }
@@ -113,23 +121,48 @@ struct SettingsOpenerView: View {
             try? await Task.sleep(for: .milliseconds(200))
         }
 
+        // Capture already-visible non-settings windows so we never mistake them for Settings.
+        let preExistingVisibleIds = Set(
+            NSApp.windows
+                .filter { $0.isVisible && !Self.isSettingsWindow($0) }
+                .map(\.windowNumber)
+        )
+
         // Two parallel detection strategies:
         // 1. Notification-based (fast path): captures the window the instant it becomes key or main.
         // 2. Periodic window scan (fallback): checks NSApp.windows every interval.
         // Calling openSettings() after subscription setup.
         let window: NSWindow? = await withCheckedContinuation { continuation in
             var capturedWindow: NSWindow?
+            var hasResumed = false
+
+            let finish: (NSWindow?) -> Void = { result in
+                guard !hasResumed else { return }
+                hasResumed = true
+                settingsOpenCancellable?.cancel()
+                settingsOpenCancellable = nil
+                pendingCancel = nil
+                continuation.resume(returning: result)
+            }
+
+            pendingCancel = {
+                finish(nil)
+            }
+
+            let matcher: (NSWindow) -> Bool = { candidate in
+                !preExistingVisibleIds.contains(candidate.windowNumber) && Self.isSettingsWindow(candidate)
+            }
 
             let windowNotifications = Publishers.Merge(
                 NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification),
                 NotificationCenter.default.publisher(for: NSWindow.didBecomeMainNotification)
             )
                 .compactMap { $0.object as? NSWindow }
-                .filter(Self.isSettingsWindow)
+                .filter(matcher)
 
-            let windowScan = Timer.publish(every: 0.5, on: .main, in: .common)
+            let windowScan = Timer.publish(every: 0.25, on: .main, in: .common)
                 .autoconnect()
-                .compactMap { _ in NSApp.windows.first(where: Self.isSettingsWindow) }
+                .compactMap { _ in NSApp.windows.first(where: matcher) }
 
             settingsOpenCancellable = windowNotifications
                 .merge(with: windowScan)
@@ -137,8 +170,7 @@ struct SettingsOpenerView: View {
                 .timeout(.seconds(5), scheduler: DispatchQueue.main)
                 .sink(
                     receiveCompletion: { _ in
-                        continuation.resume(returning: capturedWindow)
-                        settingsOpenCancellable = nil
+                        finish(capturedWindow)
                     },
                     receiveValue: { window in
                         capturedWindow = window
@@ -162,8 +194,22 @@ struct SettingsOpenerView: View {
         }
     }
 
-    private static func isSettingsWindow(_ window: NSWindow) -> Bool {
-        window.isVisible && window.frame.height > 100
+    static func isSettingsWindow(_ window: NSWindow) -> Bool {
+        guard !(window is NSPanel),
+              window.styleMask.contains(.titled),
+              window.isVisible,
+              window.frame.height > 100 else {
+            return false
+        }
+        let rawId = window.identifier?.rawValue ?? ""
+        if rawId == "SettingsOpener" {
+            return false
+        }
+        let idMatch = rawId.localizedCaseInsensitiveContains("settings")
+        let titleMatch = window.title.localizedCaseInsensitiveContains("settings")
+            || window.title.contains("设置")
+        let swiftUISettingsClass = window.className.contains("SwiftUI")
+        return idMatch || titleMatch || swiftUISettingsClass
     }
 
     private func observeSettingsClose(_ window: NSWindow, wasAccessory: Bool) {
@@ -192,6 +238,11 @@ private struct SettingsOpenerHiddenWindow: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if let existing = observer {
+                NotificationCenter.default.removeObserver(existing)
+                observer = nil
+            }
+            guard window != nil else { return }
             applyHiddenBehavior()
             // Re-apply whenever app becomes active (covers activation policy resets)
             observer = NotificationCenter.default.addObserver(

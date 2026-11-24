@@ -55,6 +55,21 @@ final class RightClickMenuHelper: NSObject {
             systemSymbolName: "arrow.clockwise"
         ))
 
+        let updateTitle: String
+        let updateSymbol: String
+        if let release = AppUpdateService.shared.availableRelease {
+            updateTitle = "发现新版本 \(release.displayVersion)…"
+            updateSymbol = "arrow.down.circle.fill"
+        } else {
+            updateTitle = "检查更新…"
+            updateSymbol = "arrow.down.circle"
+        }
+        menu.addItem(makeMenuItem(
+            title: updateTitle,
+            action: #selector(checkForUpdatesAction),
+            systemSymbolName: updateSymbol
+        ))
+
         menu.addItem(makeMenuItem(
             title: "偏好设置…",
             action: #selector(openSettingsAction),
@@ -109,6 +124,16 @@ final class RightClickMenuHelper: NSObject {
 
     @objc private func reloadData() {
         NotificationCenter.default.post(name: .remindersDataShouldUpdate, object: nil)
+    }
+
+    @objc private func checkForUpdatesAction() {
+        NSApp.openAppSettings(tab: .maintenance)
+        let updater = AppUpdateService.shared
+        if !updater.hasAvailableUpdate && !updater.state.isBusy {
+            Task {
+                await updater.checkForUpdates(userInitiated: true)
+            }
+        }
     }
 
     @objc private func openSettingsAction() {

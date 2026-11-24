@@ -67,6 +67,9 @@ final class PinnedRemindersStore: ObservableObject {
 
     private var cancellationTokens: [AnyCancellable] = []
     private var toastDismissWork: DispatchWorkItem?
+    private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration = 0
+    private var lastObservedTodayKey: String = PinnedTaskSchedule.dateKey(for: Date())
 
     @Published var activeTab: BoardTab = .board
     @Published var calendarScale: CalendarScaleMode = .week
@@ -86,9 +89,7 @@ final class PinnedRemindersStore: ObservableObject {
         didSet {
             UserPreferences.shared.completedTimeRange = completedTimeRange
             if completedTimeRange == .all && oldValue != .all {
-                Task {
-                    await refresh()
-                }
+                requestRefresh()
             }
         }
     }
@@ -118,14 +119,23 @@ final class PinnedRemindersStore: ObservableObject {
     private func addObservers() {
         Publishers.MergeMany(
             NotificationCenter.default.publisher(for: .EKEventStoreChanged),
-            NotificationCenter.default.publisher(for: .NSCalendarDayChanged),
             NotificationCenter.default.publisher(for: .remindersDataShouldUpdate)
         )
         .debounce(for: .milliseconds(150), scheduler: DispatchQueue.main)
         .sink { [weak self] _ in
-            Task {
-                await self?.refresh()
-            }
+            self?.requestRefresh()
+        }
+        .store(in: &cancellationTokens)
+
+        Publishers.MergeMany(
+            NotificationCenter.default.publisher(for: .NSCalendarDayChanged),
+            NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange),
+            NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.rollDatesForwardIfDayChanged()
+            self?.requestRefresh()
         }
         .store(in: &cancellationTokens)
 
@@ -143,11 +153,27 @@ final class PinnedRemindersStore: ObservableObject {
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                Task {
-                    await self?.refresh()
-                }
+                self?.requestRefresh()
             }
             .store(in: &cancellationTokens)
+    }
+
+    private func rollDatesForwardIfDayChanged() {
+        let newTodayKey = PinnedTaskSchedule.dateKey(for: Date())
+        guard newTodayKey != lastObservedTodayKey else { return }
+        let oldTodayKey = lastObservedTodayKey
+        lastObservedTodayKey = newTodayKey
+
+        if PinnedTaskSchedule.dateKey(for: selectedDate) == oldTodayKey {
+            goToToday()
+        }
+    }
+
+    func requestRefresh() {
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            await self?.refresh()
+        }
     }
 
     // MARK: - Synced Lists
@@ -243,12 +269,46 @@ final class PinnedRemindersStore: ObservableObject {
         return active + completed
     }
 
+    /// Pre-indexed O(N) lookup table mapping `yyyy-MM-dd` -> covered items for fast Month & Year views.
+    func itemsByDateKey(forYear year: Int? = nil) -> [String: [ReminderItem]] {
+        let cal = Calendar.current
+        var map: [String: [ReminderItem]] = [:]
+        let combined = filteredItems + filteredCompletedItems
+
+        for item in combined {
+            let sched = effectiveSchedule(for: item)
+            var seenKeys = Set<String>()
+
+            if let start = sched.startDate {
+                let normStart = cal.startOfDay(for: start)
+                for offset in 0..<max(1, sched.spanDays) {
+                    guard let day = cal.date(byAdding: .day, value: offset, to: normStart) else { continue }
+                    if let year, cal.component(.year, from: day) != year { continue }
+                    let key = PinnedTaskSchedule.dateKey(for: day)
+                    if seenKeys.insert(key).inserted {
+                        map[key, default: []].append(item)
+                    }
+                }
+            }
+
+            for key in sched.daySlots.keys where seenKeys.insert(key).inserted {
+                if let year, !key.hasPrefix("\(year)-") { continue }
+                map[key, default: []].append(item)
+            }
+        }
+        return map
+    }
+
     func itemsInYear(_ year: Int) -> [(item: ReminderItem, startDate: Date, spanDays: Int)] {
         let cal = Calendar.current
         return (filteredItems + filteredCompletedItems).compactMap { item in
             let sched = effectiveSchedule(for: item)
-            guard let start = sched.startDate,
-                  cal.component(.year, from: start) == year else {
+            guard let start = sched.startDate, let end = sched.endDate else {
+                return nil
+            }
+            let startYear = cal.component(.year, from: start)
+            let endYear = cal.component(.year, from: end)
+            guard startYear <= year && endYear >= year else {
                 return nil
             }
             return (item, start, sched.spanDays)
@@ -312,15 +372,11 @@ final class PinnedRemindersStore: ObservableObject {
         if seconds < 60 {
             return "刚刚"
         } else if Calendar.current.isDateInToday(date) {
-            let f = DateFormatter()
-            f.dateFormat = "HH:mm"
-            return f.string(from: date)
+            return RmbFormatters.hourMinute.string(from: date)
         } else if Calendar.current.isDateInYesterday(date) {
             return "昨天"
         } else {
-            let f = DateFormatter()
-            f.dateFormat = "M/d"
-            return f.string(from: date)
+            return RmbFormatters.monthDay.string(from: date)
         }
     }
 
@@ -329,7 +385,7 @@ final class PinnedRemindersStore: ObservableObject {
         if let stored = schedules[item.id] {
             return stored
         }
-        if let dueDate = item.reminder.dueDateComponents?.date {
+        if let dueDate = item.reminder.resolvedDueDate {
             let key = PinnedTaskSchedule.dateKey(for: dueDate)
             var slots: [String: DayTimeSlot] = [:]
             if item.reminder.hasTime {
@@ -471,9 +527,11 @@ final class PinnedRemindersStore: ObservableObject {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) { [weak self] in
-            guard let self else { return }
+            guard let self, self.completingIds.contains(id) else { return }
             self.completingIds.remove(id)
-            self.completeItem(reminderItem)
+            if let liveItem = self.allItems.first(where: { $0.id == id }) {
+                self.completeItem(liveItem)
+            }
         }
     }
 
@@ -481,8 +539,8 @@ final class PinnedRemindersStore: ObservableObject {
         let isRecurring = reminderItem.reminder.hasRecurrenceRules
         let itemTitle = reminderItem.reminder.title ?? ""
 
-        // Keep schedules[id] intact so completed tasks stay visible on Calendar & Hourly Timeline
-        // AND can be restored to their exact schedule via Undo or Uncomplete!
+        // Keep schedules[id] intact for non-recurring tasks so completed items stay visible
+        // on Calendar & Hourly Timeline AND restore cleanly via Undo.
         RemindersService.shared.complete(reminderItem: reminderItem)
 
         if !isRecurring {
@@ -494,7 +552,9 @@ final class PinnedRemindersStore: ObservableObject {
             }
             showCompletionToast(id: reminderItem.id, title: itemTitle)
         } else {
-            clearTimeSlot(for: reminderItem.id)
+            // Clear stale local schedule so the next recurrence follows EventKit's updated due date.
+            schedules.removeValue(forKey: reminderItem.id)
+            persistSchedules()
         }
 
         if PomodoroService.shared.linkedTaskId == reminderItem.id {
@@ -725,9 +785,7 @@ final class PinnedRemindersStore: ObservableObject {
             hidePanel()
         } else {
             showPanel(tab: tab)
-            Task {
-                await refresh()
-            }
+            requestRefresh()
         }
     }
 
@@ -748,6 +806,9 @@ final class PinnedRemindersStore: ObservableObject {
     func refresh() async {
         guard RemindersService.shared.isAuthorized else { return }
 
+        refreshGeneration += 1
+        let generation = refreshGeneration
+
         let calendars = RemindersService.shared.getCalendars()
         self.availableCalendars = calendars
 
@@ -763,8 +824,12 @@ final class PinnedRemindersStore: ObservableObject {
             for: fetchCalendars
         )
 
-        let incomplete = await incompleteFetch
-        let recentCompleted = await completedFetch
+        let incompleteResult = await incompleteFetch
+        let completedResult = await completedFetch
+
+        // Drop stale refreshes or transient EventKit fetch errors (nil) without wiping user state/schedules.
+        guard generation == refreshGeneration, !Task.isCancelled else { return }
+        guard let incomplete = incompleteResult, let recentCompleted = completedResult else { return }
 
         let activeItems = incomplete.map { ReminderItem(for: $0) }
         let limit = (completedTimeRange == .all) ? 500 : 150
@@ -772,13 +837,16 @@ final class PinnedRemindersStore: ObservableObject {
         self.allItems = activeItems
         self.completedItems = doneItems
 
-        // Preserve local schedules for temporarily excluded lists so re-enabling restores them intact.
-        if !isFilteringCalendars {
+        // Only prune orphaned schedules when we have a complete unfiltered view (not 30-day capped / filtered),
+        // preventing accidental schedule erasure during partial fetches or edit races.
+        if !isFilteringCalendars && completedTimeRange == .all && doneItems.count < limit {
             let validIds = Set(activeItems.map(\.id)).union(Set(doneItems.map(\.id)))
-            let prunedSchedules = schedules.filter { validIds.contains($0.key) }
-            if prunedSchedules.count != schedules.count {
-                schedules = prunedSchedules
-                persistSchedules()
+            if !validIds.isEmpty {
+                let prunedSchedules = schedules.filter { validIds.contains($0.key) }
+                if prunedSchedules.count != schedules.count {
+                    schedules = prunedSchedules
+                    persistSchedules()
+                }
             }
         }
 

@@ -74,6 +74,7 @@ private final class BoardDropGeometryCache {
     var dayCanvasRect: CGRect = .zero
     var timeViewportRect: CGRect = .zero
     var timeCanvasRect: CGRect = .zero
+    var monthViewportRect: CGRect = .zero
     var monthCellFrames: [String: CGRect] = [:]
 }
 
@@ -104,6 +105,14 @@ struct PinnedPanelView: View {
     private let startHour = 7
     private let endHour = 23
     private let hourHeight: CGFloat = 54
+
+    private var isBoardActive: Bool {
+        pinnedStore.activeTab == .board && !panelController.isCornerMiniMode && !pinnedStore.isCollapsed
+    }
+
+    private var isNotesActive: Bool {
+        pinnedStore.activeTab == .notes && !panelController.isCornerMiniMode && !pinnedStore.isCollapsed
+    }
 
     var body: some View {
         fullWorkspaceView
@@ -148,7 +157,7 @@ struct PinnedPanelView: View {
                                 }
                                 if mountedTabs.contains(.notes) {
                                     tabLayer(isActive: pinnedStore.activeTab == .notes) {
-                                        QuickNotesView(isActiveTab: pinnedStore.activeTab == .notes)
+                                        QuickNotesView(isActiveTab: isNotesActive)
                                     }
                                 }
                             }
@@ -205,6 +214,7 @@ struct PinnedPanelView: View {
                 .onPreferenceChange(DayCanvasFrameKey.self) { dropGeometry.dayCanvasRect = $0 }
                 .onPreferenceChange(TimeViewportFrameKey.self) { dropGeometry.timeViewportRect = $0 }
                 .onPreferenceChange(TimeCanvasFrameKey.self) { dropGeometry.timeCanvasRect = $0 }
+                .onPreferenceChange(MonthViewportFrameKey.self) { dropGeometry.monthViewportRect = $0 }
                 .onPreferenceChange(MonthCellFramesKey.self) { dropGeometry.monthCellFrames = $0 }
 
                 if !pinnedStore.isCollapsed {
@@ -265,6 +275,7 @@ struct PinnedPanelView: View {
                         dayRowHeight: dayRowHeight,
                         hoveredDropDayIndex: hoveredDropDayIndex,
                         hoveredDropMonthDateKey: hoveredDropMonthDateKey,
+                        isBoardActive: isBoardActive,
                         onSelectTaskForEdit: { editingItem = $0 }
                     )
                     .frame(width: middleWidth)
@@ -277,6 +288,7 @@ struct PinnedPanelView: View {
                         endHour: endHour,
                         hourHeight: hourHeight,
                         hoveredDropMinute: hoveredDropMinute,
+                        isBoardActive: isBoardActive,
                         onStartDragDayTask: { item, location in
                             updateCrossColumnDrag(item: item, at: location)
                         },
@@ -305,6 +317,7 @@ struct PinnedPanelView: View {
                                 dayRowHeight: dayRowHeight,
                                 hoveredDropDayIndex: hoveredDropDayIndex,
                                 hoveredDropMonthDateKey: hoveredDropMonthDateKey,
+                                isBoardActive: isBoardActive,
                                 onSelectTaskForEdit: { editingItem = $0 }
                             )
                         } else {
@@ -325,6 +338,7 @@ struct PinnedPanelView: View {
                         endHour: endHour,
                         hourHeight: hourHeight,
                         hoveredDropMinute: hoveredDropMinute,
+                        isBoardActive: isBoardActive,
                         onStartDragDayTask: { item, location in
                             updateCrossColumnDrag(item: item, at: location)
                         },
@@ -354,6 +368,7 @@ struct PinnedPanelView: View {
                             dayRowHeight: dayRowHeight,
                             hoveredDropDayIndex: hoveredDropDayIndex,
                             hoveredDropMonthDateKey: hoveredDropMonthDateKey,
+                            isBoardActive: isBoardActive,
                             onSelectTaskForEdit: { editingItem = $0 }
                         )
                     case .timeline:
@@ -363,6 +378,7 @@ struct PinnedPanelView: View {
                             endHour: endHour,
                             hourHeight: hourHeight,
                             hoveredDropMinute: hoveredDropMinute,
+                            isBoardActive: isBoardActive,
                             onStartDragDayTask: { item, location in
                                 updateCrossColumnDrag(item: item, at: location)
                             },
@@ -461,7 +477,11 @@ struct PinnedPanelView: View {
         draggingChipItem = item
         dragPointer = point
 
+        let inMonthViewport = dropGeometry.monthViewportRect == .zero
+            || dropGeometry.monthViewportRect.contains(point)
+
         if pinnedStore.calendarScale == .month,
+           inMonthViewport,
            let matchedKey = dropGeometry.monthCellFrames.first(where: { $0.value.contains(point) })?.key {
             hoveredDropMonthDateKey = matchedKey
             hoveredDropDayIndex = nil
@@ -502,8 +522,14 @@ struct PinnedPanelView: View {
                 pinnedStore.selectDate(targetDay)
             }
         } else if let minute = hoveredDropMinute {
+            let duration = max(15, min(60, endHour * 60 - minute))
             withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
-                pinnedStore.setTimeSlot(for: item.id, on: pinnedStore.selectedDate, startMinute: minute)
+                pinnedStore.setTimeSlot(
+                    for: item.id,
+                    on: pinnedStore.selectedDate,
+                    startMinute: minute,
+                    durationMinutes: duration
+                )
             }
         }
 
@@ -519,14 +545,10 @@ struct PinnedPanelView: View {
         let badge: String? = {
             if let monthKey = hoveredDropMonthDateKey,
                let date = PinnedTaskSchedule.date(fromKey: monthKey) {
-                let f = DateFormatter()
-                f.dateFormat = "M/d"
-                return f.string(from: date)
+                return RmbFormatters.monthDay.string(from: date)
             }
             if let idx = hoveredDropDayIndex, pinnedStore.visibleDays.indices.contains(idx) {
-                let f = DateFormatter()
-                f.dateFormat = "M/d"
-                return f.string(from: pinnedStore.visibleDays[idx])
+                return RmbFormatters.monthDay.string(from: pinnedStore.visibleDays[idx])
             }
             if let min = hoveredDropMinute {
                 return DayTimeSlot.formatMinute(min)
@@ -887,7 +909,6 @@ private struct TaskPoolRow: View {
     let onDragEnded: (CGPoint) -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
-    @ObservedObject private var pomodoro = PomodoroService.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
     @State private var isHovered = false
     @State private var isDragging = false
@@ -1000,7 +1021,7 @@ private struct TaskPoolRow: View {
                 }
             }
             Button("番茄钟专注此任务") {
-                pomodoro.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
+                PomodoroService.shared.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
                 PinnedPanelController.shared.snapPomodoroToTopRightCorner()
             }
             if isScheduled {
@@ -1025,6 +1046,7 @@ private struct WorkspaceHeaderBar: View {
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
+    @ObservedObject private var updateService = AppUpdateService.shared
     @Namespace private var tabPillNamespace
 
     var body: some View {
@@ -1075,12 +1097,22 @@ private struct WorkspaceHeaderBar: View {
                     PinnedPanelController.shared.toggleAlwaysOnTop()
                 }
 
-                PinnedHeaderIconButton(
-                    symbol: .gearshape,
-                    isHighlighted: false,
-                    helpText: "偏好设置"
-                ) {
-                    NSApp.openAppSettings()
+                ZStack(alignment: .topTrailing) {
+                    PinnedHeaderIconButton(
+                        symbol: .gearshape,
+                        isHighlighted: updateService.hasAvailableUpdate,
+                        helpText: updateService.availableRelease.map { "发现新版本 \($0.displayVersion)（点击前往更新）" } ?? "偏好设置"
+                    ) {
+                        NSApp.openAppSettings(tab: updateService.hasAvailableUpdate ? .maintenance : .general)
+                    }
+
+                    if updateService.hasAvailableUpdate {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 6, height: 6)
+                            .offset(x: -2, y: 2)
+                            .allowsHitTesting(false)
+                    }
                 }
 
                 PinnedHeaderIconButton(
@@ -1142,10 +1174,11 @@ private struct WorkspaceTabButton: View {
     let pillNamespace: Namespace.ID
     let action: () -> Void
 
+    @ObservedObject private var pomodoro = PomodoroService.shared
     @State private var isHovered = false
 
     private var activeColor: Color {
-        tab == .pomodoro ? PomodoroService.shared.phase.accentColor : tab.accentColor
+        tab == .pomodoro ? pomodoro.phase.accentColor : tab.accentColor
     }
 
     var body: some View {
@@ -1197,6 +1230,7 @@ private struct DayDimensionColumn: View {
     let dayRowHeight: CGFloat
     let hoveredDropDayIndex: Int?
     let hoveredDropMonthDateKey: String?
+    let isBoardActive: Bool
     let onSelectTaskForEdit: (ReminderItem) -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
@@ -1361,6 +1395,7 @@ private struct DayDimensionColumn: View {
                                 dayRowHeight: dayRowHeight,
                                 blockWidth: colW,
                                 blockX: colX,
+                                isBoardActive: isBoardActive,
                                 onTapEdit: { onSelectTaskForEdit(placed.item) }
                             )
                         }
@@ -1387,11 +1422,6 @@ private struct DayDimensionColumn: View {
         let cal = Calendar.current
         let isSelected = cal.isDate(day, inSameDayAs: pinnedStore.selectedDate)
         let isToday = cal.isDateInToday(day)
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "M/d"
-        let weekdayFormatter = DateFormatter()
-        weekdayFormatter.locale = Locale(identifier: "zh_Hans")
-        weekdayFormatter.dateFormat = "EEE"
 
         return HStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 1.5)
@@ -1407,12 +1437,12 @@ private struct DayDimensionColumn: View {
                             .fill(Color.red)
                             .frame(width: 4.5, height: 4.5)
                     }
-                    Text(isToday ? "今天" : weekdayFormatter.string(from: day))
+                    Text(isToday ? "今天" : RmbFormatters.weekdayShortZH.string(from: day))
                         .font(.system(size: 10.5, weight: isToday || isSelected ? .semibold : .medium))
                         .foregroundColor(isToday ? .red : (isSelected ? .accentColor : .primary))
                 }
 
-                Text(dateFormatter.string(from: day))
+                Text(RmbFormatters.monthDay.string(from: day))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(isSelected ? .accentColor.opacity(0.9) : .secondary)
             }
@@ -1462,38 +1492,58 @@ private struct DayDimensionColumn: View {
             visibleEntries.append((entry.item, entry.schedule, max(0, rawStart), min(6, rawEnd)))
         }
 
-        var colEnds: [Int] = []
-        var assigned: [(item: ReminderItem, schedule: PinnedTaskSchedule, startIdx: Int, endIdx: Int, col: Int)] = []
+        visibleEntries.sort { lhs, rhs in
+            if lhs.startIdx != rhs.startIdx { return lhs.startIdx < rhs.startIdx }
+            if lhs.endIdx != rhs.endIdx { return lhs.endIdx > rhs.endIdx }
+            return lhs.item.id < rhs.item.id
+        }
 
-        for e in visibleEntries {
-            var placedCol: Int?
-            for idx in colEnds.indices where colEnds[idx] < e.startIdx {
-                placedCol = idx
-                colEnds[idx] = e.endIdx
-                break
-            }
-            if let c = placedCol {
-                assigned.append((e.item, e.schedule, e.startIdx, e.endIdx, c))
+        // Partition into connected overlap clusters so every block in a cluster shares the exact same column width.
+        var clusters: [[(item: ReminderItem, schedule: PinnedTaskSchedule, startIdx: Int, endIdx: Int)]] = []
+        var clusterMaxEnd = Int.min
+        for entry in visibleEntries {
+            if clusters.isEmpty || entry.startIdx > clusterMaxEnd {
+                clusters.append([entry])
+                clusterMaxEnd = entry.endIdx
             } else {
-                colEnds.append(e.endIdx)
-                assigned.append((e.item, e.schedule, e.startIdx, e.endIdx, colEnds.count - 1))
+                clusters[clusters.count - 1].append(entry)
+                clusterMaxEnd = max(clusterMaxEnd, entry.endIdx)
             }
         }
 
-        return assigned.map { cur in
-            let maxCol = assigned.reduce(cur.col) { best, other in
-                let overlaps = cur.startIdx <= other.endIdx && cur.endIdx >= other.startIdx
-                return overlaps ? max(best, other.col) : best
+        var result: [PlacedDaySpan] = []
+        for cluster in clusters {
+            var colEnds: [Int] = []
+            var assigned: [(item: ReminderItem, schedule: PinnedTaskSchedule, startIdx: Int, endIdx: Int, col: Int)] = []
+            for e in cluster {
+                var placedCol: Int?
+                for idx in colEnds.indices where colEnds[idx] < e.startIdx {
+                    placedCol = idx
+                    colEnds[idx] = e.endIdx
+                    break
+                }
+                if let c = placedCol {
+                    assigned.append((e.item, e.schedule, e.startIdx, e.endIdx, c))
+                } else {
+                    colEnds.append(e.endIdx)
+                    assigned.append((e.item, e.schedule, e.startIdx, e.endIdx, colEnds.count - 1))
+                }
             }
-            return PlacedDaySpan(
-                item: cur.item,
-                schedule: cur.schedule,
-                clampedStartIndex: cur.startIdx,
-                clampedSpan: max(1, cur.endIdx - cur.startIdx + 1),
-                columnIndex: cur.col,
-                totalColumns: maxCol + 1
-            )
+            let totalCols = max(1, colEnds.count)
+            for cur in assigned {
+                result.append(
+                    PlacedDaySpan(
+                        item: cur.item,
+                        schedule: cur.schedule,
+                        clampedStartIndex: cur.startIdx,
+                        clampedSpan: max(1, cur.endIdx - cur.startIdx + 1),
+                        columnIndex: cur.col,
+                        totalColumns: totalCols
+                    )
+                )
+            }
         }
+        return result
     }
 }
 
@@ -1508,10 +1558,10 @@ private struct DaySpanBlockView: View {
     let dayRowHeight: CGFloat
     let blockWidth: CGFloat
     let blockX: CGFloat
+    let isBoardActive: Bool
     let onTapEdit: () -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
-    @ObservedObject private var pomodoro = PomodoroService.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
 
     @State private var moveDeltaY: CGFloat = 0
@@ -1545,17 +1595,20 @@ private struct DaySpanBlockView: View {
     }
 
     private var moveDayDelta: Int {
-        Int((moveDeltaY / dayRowHeight).rounded())
+        let raw = Int((moveDeltaY / dayRowHeight).rounded())
+        return max(-visibleStartOffset, min(7 - visibleSpan - visibleStartOffset, raw))
     }
 
     private var topDayDelta: Int {
         let raw = Int((topResizeDeltaY / dayRowHeight).rounded())
-        return min(schedule.spanDays - 1, raw)
+        return max(-visibleStartOffset, min(min(schedule.spanDays, visibleSpan) - 1, raw))
     }
 
     private var bottomDayDelta: Int {
         let raw = Int((bottomResizeDeltaY / dayRowHeight).rounded())
-        return max(1 - schedule.spanDays, raw)
+        let minDelta = max(1 - schedule.spanDays, 1 - visibleSpan)
+        let maxDelta = max(0, 7 - visibleStartOffset - visibleSpan)
+        return max(minDelta, min(maxDelta, raw))
     }
 
     private var baseTopY: CGFloat {
@@ -1571,7 +1624,7 @@ private struct DaySpanBlockView: View {
         if isMoving {
             return (baseTopY + moveDeltaY).constrainedTo(min: 3, max: max(3, maxTop))
         } else if isResizingTop {
-            let maxTopResize = baseTopY + baseHeight - (dayRowHeight - 6)
+            let maxTopResize = max(3, baseTopY + baseHeight - (dayRowHeight - 6))
             return (baseTopY + topResizeDeltaY).constrainedTo(min: 3, max: maxTopResize)
         }
         return baseTopY
@@ -1579,7 +1632,7 @@ private struct DaySpanBlockView: View {
 
     private var liveHeight: CGFloat {
         if isResizingBottom {
-            let maxH = CGFloat(7 - visibleStartOffset) * dayRowHeight - 6
+            let maxH = max(dayRowHeight - 6, CGFloat(7 - visibleStartOffset) * dayRowHeight - 6)
             return (baseHeight + bottomResizeDeltaY).constrainedTo(min: dayRowHeight - 6, max: maxH)
         } else if isResizingTop {
             let bottomEdge = baseTopY + baseHeight
@@ -1605,8 +1658,7 @@ private struct DaySpanBlockView: View {
         if isResizingBottom {
             span = max(1, min(7 - visibleStartOffset, visibleSpan + bottomDayDelta))
         } else if isResizingTop {
-            let clamped = max(-visibleStartOffset, min(visibleSpan - 1, topDayDelta))
-            span = max(1, visibleSpan - clamped)
+            span = max(1, visibleSpan - topDayDelta)
         } else {
             span = visibleSpan
         }
@@ -1629,9 +1681,9 @@ private struct DaySpanBlockView: View {
             span = max(1, schedule.spanDays + bottomDayDelta)
         }
         let end = cal.date(byAdding: .day, value: max(0, span - 1), to: start) ?? start
-        let f = DateFormatter()
-        f.dateFormat = "M/d"
-        return span <= 1 ? "\(f.string(from: start)) · 1天" : "\(f.string(from: start))–\(f.string(from: end)) · \(span)天"
+        let startStr = RmbFormatters.monthDay.string(from: start)
+        let endStr = RmbFormatters.monthDay.string(from: end)
+        return span <= 1 ? "\(startStr) · 1天" : "\(startStr)–\(endStr) · \(span)天"
     }
 
     private var isActiveDrag: Bool {
@@ -1700,7 +1752,7 @@ private struct DaySpanBlockView: View {
                     }
                     if !isDone {
                         Button("番茄钟专注此任务") {
-                            pomodoro.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
+                            PomodoroService.shared.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
                             PinnedPanelController.shared.snapPomodoroToTopRightCorner()
                         }
                     }
@@ -1794,6 +1846,7 @@ private struct DaySpanBlockView: View {
                         color: quadrantColor,
                         isActive: isResizingTop,
                         isCardHovered: isHovered,
+                        isInteractionActive: isBoardActive,
                         hitHeight: 11,
                         pillAlignment: .center,
                         helpText: "拖动上边缘调整开始日期",
@@ -1827,6 +1880,7 @@ private struct DaySpanBlockView: View {
                         color: quadrantColor,
                         isActive: isResizingBottom,
                         isCardHovered: isHovered,
+                        isInteractionActive: isBoardActive,
                         hitHeight: 14,
                         pillAlignment: .center,
                         helpText: "拖动下边缘拉长或缩短占用天数",
@@ -1885,12 +1939,12 @@ private struct DaySpanBlockView: View {
         } else if isHovered {
             HStack(spacing: 4) {
                 Button {
-                    pomodoro.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
+                    PomodoroService.shared.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
                     PinnedPanelController.shared.snapPomodoroToTopRightCorner()
                 } label: {
                     Image(systemName: "timer")
                         .font(.system(size: 10.5))
-                        .foregroundColor(pomodoro.phase.accentColor)
+                        .foregroundColor(PomodoroPhase.focus.accentColor)
                         .frame(width: 16, height: 16)
                         .contentShape(Rectangle())
                 }
@@ -1898,9 +1952,13 @@ private struct DaySpanBlockView: View {
                 .help("右上角番茄钟专注")
 
                 Button {
+                    let targetDay = schedule.covers(date: pinnedStore.selectedDate)
+                        ? pinnedStore.selectedDate
+                        : (schedule.startDate ?? pinnedStore.selectedDate)
                     let comps = Calendar.current.dateComponents([.hour], from: Date())
                     let startMin = max(7, min(21, comps.hour ?? 9)) * 60
-                    pinnedStore.setTimeSlot(for: reminderItem.id, on: pinnedStore.selectedDate, startMinute: startMin)
+                    pinnedStore.selectDate(targetDay)
+                    pinnedStore.setTimeSlot(for: reminderItem.id, on: targetDay, startMinute: startMin)
                 } label: {
                     Image(systemName: "arrow.right.circle")
                         .font(.system(size: 11))
@@ -1924,18 +1982,17 @@ private struct HourlySlotsColumn: View {
     let endHour: Int
     let hourHeight: CGFloat
     let hoveredDropMinute: Int?
+    let isBoardActive: Bool
     let onStartDragDayTask: (ReminderItem, CGPoint) -> Void
     let onEndDragDayTask: (ReminderItem, CGPoint) -> Void
     let onSelectTaskForEdit: (ReminderItem) -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
-    @State private var now = Date()
     @State private var didInitialScroll = false
 
     private var timeAxisWidth: CGFloat {
         columnWidth < 230 ? 36 : 42
     }
-    private let minuteTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private var canvasHeight: CGFloat { CGFloat(endHour - startHour) * hourHeight }
 
     var body: some View {
@@ -2034,7 +2091,9 @@ private struct HourlySlotsColumn: View {
                         }
 
                         if let dropMin = hoveredDropMinute {
+                            let previewDur = max(15, min(60, endHour * 60 - dropMin))
                             let topY = CGFloat(dropMin - startHour * 60) / 60.0 * hourHeight
+                            let previewH = max(26, CGFloat(previewDur) / 60.0 * hourHeight)
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(Color.accentColor.opacity(0.16))
                                 .overlay(
@@ -2043,14 +2102,14 @@ private struct HourlySlotsColumn: View {
                                 )
                                 .overlay(
                                     HStack {
-                                        Text("\(DayTimeSlot.formatMinute(dropMin))–\(DayTimeSlot.formatMinute(dropMin + 60))")
+                                        Text("\(DayTimeSlot.formatMinute(dropMin))–\(DayTimeSlot.formatMinute(dropMin + previewDur))")
                                             .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                                             .foregroundColor(.accentColor)
                                         Spacer()
                                     }
                                     .padding(.horizontal, 8)
                                 )
-                                .frame(height: hourHeight)
+                                .frame(height: previewH)
                                 .padding(.leading, timeAxisWidth + 7)
                                 .padding(.trailing, 8)
                                 .offset(y: topY)
@@ -2074,23 +2133,28 @@ private struct HourlySlotsColumn: View {
                                     hourHeight: hourHeight,
                                     blockWidth: colW,
                                     blockX: colX,
+                                    isBoardActive: isBoardActive,
                                     onTapEdit: { onSelectTaskForEdit(placed.item) }
                                 )
                             }
                         }
 
-                        if pinnedStore.isViewingToday, let nowY = currentTimeYOffset {
-                            HStack(spacing: 0) {
-                                Spacer().frame(width: timeAxisWidth + 2)
-                                Circle()
-                                    .fill(Color.red.opacity(0.9))
-                                    .frame(width: 6, height: 6)
-                                Rectangle()
-                                    .fill(Color.red.opacity(0.45))
-                                    .frame(height: 1)
+                        if pinnedStore.isViewingToday {
+                            TimelineView(.periodic(from: .now, by: 30)) { context in
+                                if let nowY = currentTimeYOffset(for: context.date) {
+                                    HStack(spacing: 0) {
+                                        Spacer().frame(width: timeAxisWidth + 2)
+                                        Circle()
+                                            .fill(Color.red.opacity(0.9))
+                                            .frame(width: 6, height: 6)
+                                        Rectangle()
+                                            .fill(Color.red.opacity(0.45))
+                                            .frame(height: 1)
+                                    }
+                                    .offset(y: nowY - 3)
+                                    .allowsHitTesting(false)
+                                }
                             }
-                            .offset(y: nowY - 3)
-                            .allowsHitTesting(false)
                         }
                     }
                     .coordinateSpace(name: "timeCanvas")
@@ -2111,7 +2175,7 @@ private struct HourlySlotsColumn: View {
                 .onAppear {
                     guard !didInitialScroll else { return }
                     didInitialScroll = true
-                    let currentHour = Calendar.current.component(.hour, from: now)
+                    let currentHour = Calendar.current.component(.hour, from: Date())
                     let targetHour = max(startHour, min(endHour - 3, currentHour - 1))
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         scrollProxy.scrollTo("hour-\(targetHour)", anchor: .top)
@@ -2119,38 +2183,33 @@ private struct HourlySlotsColumn: View {
                 }
             }
         }
-        .onReceive(minuteTimer) { now = $0 }
     }
 
     private var selectedDayHeaderText: String {
         let cal = Calendar.current
-        let f = DateFormatter()
         let isToday = cal.isDateInToday(pinnedStore.selectedDate)
         let isTomorrow = cal.isDateInTomorrow(pinnedStore.selectedDate)
 
         if columnWidth >= 255 {
-            f.dateFormat = "M月d日"
-            let s = f.string(from: pinnedStore.selectedDate)
+            let s = RmbFormatters.monthDayChinese.string(from: pinnedStore.selectedDate)
             if isToday { return "当日时段 · 今天 \(s)" }
             if isTomorrow { return "当日时段 · 明天 \(s)" }
             return "当日时段 · \(s)"
         } else if columnWidth >= 195 {
-            f.dateFormat = "M月d日"
-            let s = f.string(from: pinnedStore.selectedDate)
+            let s = RmbFormatters.monthDayChinese.string(from: pinnedStore.selectedDate)
             if isToday { return "今天 \(s)" }
             if isTomorrow { return "明天 \(s)" }
             return "时段 · \(s)"
         } else {
-            f.dateFormat = "M/d"
-            let s = f.string(from: pinnedStore.selectedDate)
+            let s = RmbFormatters.monthDay.string(from: pinnedStore.selectedDate)
             if isToday { return "今天 \(s)" }
             if isTomorrow { return "明天 \(s)" }
             return s
         }
     }
 
-    private var currentTimeYOffset: CGFloat? {
-        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+    private func currentTimeYOffset(for date: Date) -> CGFloat? {
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
         let mins = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         guard mins >= startHour * 60 && mins <= endHour * 60 else { return nil }
         return CGFloat(mins - startHour * 60) / 60.0 * hourHeight
@@ -2164,33 +2223,55 @@ private struct HourlySlotsColumn: View {
     }
 
     private func layoutHourlySlots(_ entries: [(item: ReminderItem, slot: DayTimeSlot)]) -> [PlacedSlot] {
-        var colEnds: [Int] = []
-        var assigned: [(item: ReminderItem, slot: DayTimeSlot, col: Int)] = []
-
-        for entry in entries {
-            let s = entry.slot.startMinute
-            let e = entry.slot.endMinute
-            var placedCol: Int?
-            for idx in colEnds.indices where colEnds[idx] <= s {
-                placedCol = idx
-                colEnds[idx] = e
-                break
+        let sorted = entries.sorted { lhs, rhs in
+            if lhs.slot.startMinute != rhs.slot.startMinute {
+                return lhs.slot.startMinute < rhs.slot.startMinute
             }
-            if let c = placedCol {
-                assigned.append((entry.item, entry.slot, c))
+            if lhs.slot.endMinute != rhs.slot.endMinute {
+                return lhs.slot.endMinute > rhs.slot.endMinute
+            }
+            return lhs.item.id < rhs.item.id
+        }
+
+        // Partition into connected overlap clusters so transitive overlaps never produce colliding column widths.
+        var clusters: [[(item: ReminderItem, slot: DayTimeSlot)]] = []
+        var clusterMaxEnd = Int.min
+        for entry in sorted {
+            if clusters.isEmpty || entry.slot.startMinute >= clusterMaxEnd {
+                clusters.append([entry])
+                clusterMaxEnd = entry.slot.endMinute
             } else {
-                colEnds.append(e)
-                assigned.append((entry.item, entry.slot, colEnds.count - 1))
+                clusters[clusters.count - 1].append(entry)
+                clusterMaxEnd = max(clusterMaxEnd, entry.slot.endMinute)
             }
         }
 
-        return assigned.map { cur in
-            let maxCol = assigned.reduce(cur.col) { best, other in
-                let overlaps = cur.slot.startMinute < other.slot.endMinute && cur.slot.endMinute > other.slot.startMinute
-                return overlaps ? max(best, other.col) : best
+        var result: [PlacedSlot] = []
+        for cluster in clusters {
+            var colEnds: [Int] = []
+            var assigned: [(item: ReminderItem, slot: DayTimeSlot, col: Int)] = []
+            for entry in cluster {
+                let s = entry.slot.startMinute
+                let e = entry.slot.endMinute
+                var placedCol: Int?
+                for idx in colEnds.indices where colEnds[idx] <= s {
+                    placedCol = idx
+                    colEnds[idx] = e
+                    break
+                }
+                if let c = placedCol {
+                    assigned.append((entry.item, entry.slot, c))
+                } else {
+                    colEnds.append(e)
+                    assigned.append((entry.item, entry.slot, colEnds.count - 1))
+                }
             }
-            return PlacedSlot(item: cur.item, slot: cur.slot, columnIndex: cur.col, totalColumns: maxCol + 1)
+            let totalCols = max(1, colEnds.count)
+            for cur in assigned {
+                result.append(PlacedSlot(item: cur.item, slot: cur.slot, columnIndex: cur.col, totalColumns: totalCols))
+            }
         }
+        return result
     }
 }
 
@@ -2205,10 +2286,10 @@ private struct HourlySlotBlockView: View {
     let hourHeight: CGFloat
     let blockWidth: CGFloat
     let blockX: CGFloat
+    let isBoardActive: Bool
     let onTapEdit: () -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
-    @ObservedObject private var pomodoro = PomodoroService.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
 
     @State private var moveDeltaY: CGFloat = 0
@@ -2264,11 +2345,11 @@ private struct HourlySlotBlockView: View {
     private var snappedStartMinute: Int {
         if isMoving {
             let delta = Int(((moveDeltaY / hourHeight) * 60.0 / 15.0).rounded()) * 15
-            let maxStart = endHour * 60 - slot.durationMinutes
+            let maxStart = max(startHour * 60, endHour * 60 - slot.durationMinutes)
             return max(startHour * 60, min(maxStart, slot.startMinute + delta))
         } else if isResizingTop {
             let delta = Int(((topResizeDeltaY / hourHeight) * 60.0 / 15.0).rounded()) * 15
-            let maxStart = slot.endMinute - 15
+            let maxStart = max(startHour * 60, slot.endMinute - 15)
             return max(startHour * 60, min(maxStart, slot.startMinute + delta))
         }
         return slot.startMinute
@@ -2277,7 +2358,7 @@ private struct HourlySlotBlockView: View {
     private var snappedDurationMinutes: Int {
         if isResizingBottom {
             let delta = Int(((bottomResizeDeltaY / hourHeight) * 60.0 / 15.0).rounded()) * 15
-            let maxDur = min(480, endHour * 60 - slot.startMinute)
+            let maxDur = max(15, min(480, endHour * 60 - slot.startMinute))
             return max(15, min(maxDur, slot.durationMinutes + delta))
         } else if isResizingTop {
             return max(15, slot.endMinute - snappedStartMinute)
@@ -2289,7 +2370,7 @@ private struct HourlySlotBlockView: View {
         if isMoving {
             return (baseTopY + moveDeltaY).constrainedTo(min: 0, max: max(0, totalCanvasPx - baseHeight))
         } else if isResizingTop {
-            let maxTop = baseTopY + baseHeight - minBlockHeight
+            let maxTop = max(0, baseTopY + baseHeight - minBlockHeight)
             return (baseTopY + topResizeDeltaY).constrainedTo(min: 0, max: maxTop)
         }
         return baseTopY
@@ -2297,7 +2378,7 @@ private struct HourlySlotBlockView: View {
 
     private var liveHeight: CGFloat {
         if isResizingBottom {
-            let maxH = min(8.0 * hourHeight, totalCanvasPx - baseTopY)
+            let maxH = max(minBlockHeight, min(8.0 * hourHeight, totalCanvasPx - baseTopY))
             return (baseHeight + bottomResizeDeltaY).constrainedTo(min: minBlockHeight, max: maxH)
         } else if isResizingTop {
             let bottomEdge = baseTopY + baseHeight
@@ -2385,7 +2466,7 @@ private struct HourlySlotBlockView: View {
                     }
                     if !isDone {
                         Button("番茄钟专注此任务") {
-                            pomodoro.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
+                            PomodoroService.shared.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
                             PinnedPanelController.shared.snapPomodoroToTopRightCorner()
                         }
                     }
@@ -2485,6 +2566,7 @@ private struct HourlySlotBlockView: View {
                         color: quadrantColor,
                         isActive: isResizingTop,
                         isCardHovered: isHovered,
+                        isInteractionActive: isBoardActive,
                         hitHeight: compact ? 8 : 11,
                         pillAlignment: .center,
                         helpText: "拖动上边缘调整开始时间",
@@ -2517,6 +2599,7 @@ private struct HourlySlotBlockView: View {
                         color: quadrantColor,
                         isActive: isResizingBottom,
                         isCardHovered: isHovered,
+                        isInteractionActive: isBoardActive,
                         hitHeight: compact ? 9 : 13,
                         pillAlignment: .center,
                         helpText: "拖动下边缘拉长或缩短占用时长",
@@ -2574,12 +2657,12 @@ private struct HourlySlotBlockView: View {
         } else if isHovered && !narrowBlock {
             HStack(spacing: 4) {
                 Button {
-                    pomodoro.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
+                    PomodoroService.shared.focusOnTask(id: reminderItem.id, title: reminderItem.reminder.title ?? "")
                     PinnedPanelController.shared.snapPomodoroToTopRightCorner()
                 } label: {
                     Image(systemName: "timer")
                         .font(.system(size: 10.5))
-                        .foregroundColor(pomodoro.phase.accentColor)
+                        .foregroundColor(PomodoroPhase.focus.accentColor)
                         .frame(width: 16, height: 16)
                         .contentShape(Rectangle())
                 }
@@ -2610,6 +2693,7 @@ private struct CardVerticalResizeEdge: View {
     let color: Color
     let isActive: Bool
     let isCardHovered: Bool
+    let isInteractionActive: Bool
     let hitHeight: CGFloat
     let pillAlignment: Alignment
     let helpText: String
@@ -2648,6 +2732,7 @@ private struct CardVerticalResizeEdge: View {
                 .animation(.easeOut(duration: 0.12), value: isHandleHovered)
 
             VerticalResizeMouseCatcher(
+                isInteractionActive: isInteractionActive,
                 onHoverChanged: { hovering in
                     isHandleHovered = hovering
                 },
@@ -2663,6 +2748,7 @@ private struct CardVerticalResizeEdge: View {
 }
 
 private struct VerticalResizeMouseCatcher: NSViewRepresentable {
+    let isInteractionActive: Bool
     let onHoverChanged: (Bool) -> Void
     let onDragChanged: (CGFloat) -> Void
     let onDragEnded: (CGFloat) -> Void
@@ -2672,6 +2758,7 @@ private struct VerticalResizeMouseCatcher: NSViewRepresentable {
         view.onHoverChanged = onHoverChanged
         view.onDragChanged = onDragChanged
         view.onDragEnded = onDragEnded
+        view.setInteractionActive(isInteractionActive)
         return view
     }
 
@@ -2679,6 +2766,7 @@ private struct VerticalResizeMouseCatcher: NSViewRepresentable {
         nsView.onHoverChanged = onHoverChanged
         nsView.onDragChanged = onDragChanged
         nsView.onDragEnded = onDragEnded
+        nsView.setInteractionActive(isInteractionActive)
     }
 }
 
@@ -2687,6 +2775,7 @@ private final class VerticalResizeMouseNSView: NSView {
     var onDragChanged: ((CGFloat) -> Void)?
     var onDragEnded: ((CGFloat) -> Void)?
 
+    private var isInteractionActive = true
     private var initialMouseScreenY: CGFloat = 0
     private var isDragging = false
     private var hasMoved = false
@@ -2699,6 +2788,21 @@ private final class VerticalResizeMouseNSView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    func setInteractionActive(_ active: Bool) {
+        let shouldHide = !active
+        guard isInteractionActive != active || isHidden != shouldHide else { return }
+        isInteractionActive = active
+        isHidden = shouldHide
+        if !active && (isPointerInside || isDragging) {
+            isDragging = false
+            hasMoved = false
+            isPointerInside = false
+            onHoverChanged?(false)
+            NSCursor.arrow.set()
+        }
+        window?.invalidateCursorRects(for: self)
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -2728,20 +2832,27 @@ private final class VerticalResizeMouseNSView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        guard isInteractionActive, !isHiddenOrHasHiddenAncestor else { return }
         addCursorRect(bounds, cursor: .resizeUpDown)
     }
 
     override func cursorUpdate(with event: NSEvent) {
+        guard isInteractionActive, !isHiddenOrHasHiddenAncestor else { return }
         NSCursor.resizeUpDown.set()
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard isInteractionActive, !isHiddenOrHasHiddenAncestor else { return }
         isPointerInside = true
         NSCursor.resizeUpDown.set()
         onHoverChanged?(true)
     }
 
     override func mouseExited(with event: NSEvent) {
+        guard isInteractionActive, !isHiddenOrHasHiddenAncestor else {
+            isPointerInside = false
+            return
+        }
         isPointerInside = false
         if !isDragging {
             NSCursor.arrow.set()
@@ -2750,6 +2861,7 @@ private final class VerticalResizeMouseNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard isInteractionActive, !isHiddenOrHasHiddenAncestor else { return }
         initialMouseScreenY = NSEvent.mouseLocation.y
         isDragging = true
         hasMoved = false
@@ -2757,7 +2869,7 @@ private final class VerticalResizeMouseNSView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard isDragging else { return }
+        guard isDragging, isInteractionActive, !isHiddenOrHasHiddenAncestor else { return }
         NSCursor.resizeUpDown.set()
         let dy = initialMouseScreenY - NSEvent.mouseLocation.y
         hasMoved = true
@@ -2771,11 +2883,11 @@ private final class VerticalResizeMouseNSView: NSView {
         isDragging = false
         hasMoved = false
 
-        if didMove {
+        if didMove && isInteractionActive {
             onDragEnded?(dy)
         }
 
-        if let window {
+        if isInteractionActive, !isHiddenOrHasHiddenAncestor, let window {
             let ptInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
             let ptInSelf = convert(ptInWindow, from: nil)
             let stillInside = bounds.contains(ptInSelf)
@@ -2984,8 +3096,7 @@ struct CompletedTasksSection: View {
                         )
                         .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
+                .modifier(RmbPlainMenuStyle())
                 .fixedSize()
                 .help("筛选已完成任务的时间范围")
             }
@@ -3193,14 +3304,12 @@ struct CompletionUndoToastBanner: View {
     }
 }
 
-private extension View {
-    @ViewBuilder
-    func rmbIdentityContentTransition() -> some View {
-        if #available(macOS 13.0, *) {
-            self.contentTransition(.identity)
-        } else {
-            self
-        }
+struct RmbPlainMenuStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
     }
 }
 
@@ -3219,7 +3328,7 @@ private struct PinnedHeaderIconButton: View {
         } label: {
             Image(rmbSymbol: symbol)
                 .font(.system(size: 11, weight: .medium))
-                .rmbIdentityContentTransition()
+                .contentTransition(.identity)
                 .foregroundColor(isHighlighted ? .accentColor : (isHovered ? .primary : .secondary))
                 .frame(width: 24, height: 24)
                 .background(

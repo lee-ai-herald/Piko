@@ -1,6 +1,6 @@
 import Cocoa
-import SwiftUI
 import Combine
+import SwiftUI
 
 enum PomodoroPhase: String, CaseIterable, Identifiable {
     case focus
@@ -43,31 +43,63 @@ enum PomodoroPhase: String, CaseIterable, Identifiable {
     }
 }
 
+/// Isolated 1Hz countdown state so ticking only redraws timer-display leaf views instead of the entire workspace.
+@MainActor
+final class PomodoroTicker: ObservableObject {
+    @Published fileprivate(set) var remainingSeconds: Int
+    @Published fileprivate(set) var totalSeconds: Int
+
+    init(totalSeconds: Int) {
+        self.totalSeconds = totalSeconds
+        self.remainingSeconds = totalSeconds
+    }
+
+    var progress: Double {
+        guard totalSeconds > 0 else { return 0 }
+        return max(0, min(1, 1.0 - (Double(remainingSeconds) / Double(totalSeconds))))
+    }
+
+    var formattedTime: String {
+        let clamped = max(0, remainingSeconds)
+        let mins = clamped / 60
+        let secs = clamped % 60
+        return String(format: "%02d:%02d", mins, secs)
+    }
+
+    var estimatedFinishTimeText: String {
+        let finishDate = Date().addingTimeInterval(TimeInterval(max(0, remainingSeconds)))
+        return "预计 \(RmbFormatters.hourMinute.string(from: finishDate)) 结束"
+    }
+}
+
 @MainActor
 final class PomodoroService: ObservableObject {
     static let shared = PomodoroService()
 
+    /// Fine-grained 1Hz countdown publisher — observe this only in countdown text / progress ring views.
+    let ticker: PomodoroTicker
+
     @Published var phase: PomodoroPhase = .focus
     @Published private(set) var isRunning = false
-    @Published private(set) var remainingSeconds: Int
-    @Published private(set) var totalSeconds: Int
     @Published var linkedTaskId: String?
     @Published var linkedTaskTitle: String?
     @Published private(set) var completedFocusToday: Int
     @Published var lastFinishedBanner: String?
 
     private var timer: Timer?
-    private var focusStreakInCycle = 0
+    private var phaseEndDate: Date?
+    private var focusStreakInCycle: Int
     private var bannerDismissWork: DispatchWorkItem?
-    private var preferenceCancellable: AnyCancellable?
+    private var cancellables: Set<AnyCancellable> = []
 
     private init() {
-        let initialMinutes = UserPreferences.shared.pomodoroFocusMinutes
-        self.totalSeconds = initialMinutes * 60
-        self.remainingSeconds = initialMinutes * 60
-        self.completedFocusToday = Self.loadCompletedToday()
+        let initialSeconds = UserPreferences.shared.pomodoroFocusMinutes * 60
+        self.ticker = PomodoroTicker(totalSeconds: initialSeconds)
+        let todayCount = Self.loadCompletedToday()
+        self.completedFocusToday = todayCount
+        self.focusStreakInCycle = todayCount % 4
 
-        preferenceCancellable = Publishers.MergeMany(
+        Publishers.MergeMany(
             UserPreferences.shared.$pomodoroFocusMinutes.dropFirst().map { _ in }.eraseToAnyPublisher(),
             UserPreferences.shared.$pomodoroShortBreakMinutes.dropFirst().map { _ in }.eraseToAnyPublisher(),
             UserPreferences.shared.$pomodoroLongBreakMinutes.dropFirst().map { _ in }.eraseToAnyPublisher(),
@@ -76,29 +108,39 @@ final class PomodoroService: ObservableObject {
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
             guard let self else { return }
-            if !self.isRunning && self.remainingSeconds == self.totalSeconds {
+            if !self.isRunning && self.ticker.remainingSeconds == self.ticker.totalSeconds {
                 self.resetCurrentPhase()
             }
             self.notifyMenuBar()
         }
+        .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.refreshDailyCounterIfNeeded()
+            }
+            .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.refreshDailyCounterIfNeeded()
+                self?.syncWallClockTick()
+            }
+            .store(in: &cancellables)
     }
 
-    var progress: Double {
-        guard totalSeconds > 0 else { return 0 }
-        return 1.0 - (Double(remainingSeconds) / Double(totalSeconds))
-    }
-
-    var formattedTime: String {
-        let mins = remainingSeconds / 60
-        let secs = remainingSeconds % 60
-        return String(format: "%02d:%02d", mins, secs)
-    }
+    var remainingSeconds: Int { ticker.remainingSeconds }
+    var totalSeconds: Int { ticker.totalSeconds }
+    var progress: Double { ticker.progress }
+    var formattedTime: String { ticker.formattedTime }
 
     var menuBarText: String? {
         guard UserPreferences.shared.pomodoroShowInMenuBar else { return nil }
-        guard isRunning || remainingSeconds < totalSeconds else { return nil }
+        guard isRunning || ticker.remainingSeconds < ticker.totalSeconds else { return nil }
         let prefix = phase == .focus ? "🍅" : "☕"
-        return "\(prefix) \(formattedTime)"
+        return "\(prefix) \(ticker.formattedTime)"
     }
 
     // MARK: - Controls
@@ -113,25 +155,31 @@ final class PomodoroService: ObservableObject {
 
     func start() {
         guard !isRunning else { return }
-        if remainingSeconds <= 0 {
+        refreshDailyCounterIfNeeded()
+        if ticker.remainingSeconds <= 0 {
             resetCurrentPhase()
         }
+        phaseEndDate = Date().addingTimeInterval(TimeInterval(ticker.remainingSeconds))
         isRunning = true
         lastFinishedBanner = nil
         notifyMenuBar()
 
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let nextTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.tick()
+                self?.syncWallClockTick()
             }
         }
-        if let timer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
+        nextTimer.tolerance = 0.1
+        RunLoop.main.add(nextTimer, forMode: .common)
+        timer = nextTimer
     }
 
     func pause() {
+        if let endDate = phaseEndDate, isRunning {
+            ticker.remainingSeconds = max(0, Int(ceil(endDate.timeIntervalSinceNow)))
+        }
+        phaseEndDate = nil
         isRunning = false
         timer?.invalidate()
         timer = nil
@@ -141,8 +189,8 @@ final class PomodoroService: ObservableObject {
     func resetCurrentPhase() {
         pause()
         let seconds = phase.defaultDurationMinutes * 60
-        totalSeconds = seconds
-        remainingSeconds = seconds
+        ticker.totalSeconds = seconds
+        ticker.remainingSeconds = seconds
         notifyMenuBar()
     }
 
@@ -150,8 +198,8 @@ final class PomodoroService: ObservableObject {
         pause()
         phase = newPhase
         let seconds = newPhase.defaultDurationMinutes * 60
-        totalSeconds = seconds
-        remainingSeconds = seconds
+        ticker.totalSeconds = seconds
+        ticker.remainingSeconds = seconds
         notifyMenuBar()
     }
 
@@ -172,8 +220,8 @@ final class PomodoroService: ObservableObject {
 
         if phase == targetPhase {
             pause()
-            totalSeconds = clamped * 60
-            remainingSeconds = clamped * 60
+            ticker.totalSeconds = clamped * 60
+            ticker.remainingSeconds = clamped * 60
             notifyMenuBar()
         }
     }
@@ -194,15 +242,18 @@ final class PomodoroService: ObservableObject {
         completeCurrentPhase(playSound: false, countFocus: false)
     }
 
-    // MARK: - Tick & Completion
+    // MARK: - Wall-Clock Tick & Completion
 
-    private func tick() {
-        guard isRunning else { return }
-        if remainingSeconds > 1 {
-            remainingSeconds -= 1
-            notifyMenuBar()
+    private func syncWallClockTick() {
+        guard isRunning, let endDate = phaseEndDate else { return }
+        let remaining = Int(ceil(endDate.timeIntervalSinceNow))
+        if remaining > 0 {
+            if ticker.remainingSeconds != remaining {
+                ticker.remainingSeconds = remaining
+                notifyMenuBar()
+            }
         } else {
-            remainingSeconds = 0
+            ticker.remainingSeconds = 0
             completeCurrentPhase(playSound: true, countFocus: true)
         }
     }
@@ -233,8 +284,8 @@ final class PomodoroService: ObservableObject {
         }
 
         let nextSeconds = phase.defaultDurationMinutes * 60
-        totalSeconds = nextSeconds
-        remainingSeconds = nextSeconds
+        ticker.totalSeconds = nextSeconds
+        ticker.remainingSeconds = nextSeconds
         notifyMenuBar()
     }
 
@@ -252,6 +303,14 @@ final class PomodoroService: ObservableObject {
 
     private func notifyMenuBar() {
         AppDelegate.shared?.updatePomodoroMenuBarText(menuBarText)
+    }
+
+    private func refreshDailyCounterIfNeeded() {
+        let todayKey = PinnedTaskSchedule.dateKey(for: Date())
+        if UserPreferences.shared.pomodoroCompletedTodayDate != todayKey {
+            completedFocusToday = 0
+            focusStreakInCycle = 0
+        }
     }
 
     private static func loadCompletedToday() -> Int {

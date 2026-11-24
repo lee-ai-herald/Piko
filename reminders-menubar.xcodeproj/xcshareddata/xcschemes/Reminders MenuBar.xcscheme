@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "712C32AF24BF939100AC75E2"
-               BuildableName = "Reminders MenuBar.app"
+               BuildableName = "Piko.app"
                BlueprintName = "Reminders MenuBar"
                ReferencedContainer = "container:reminders-menubar.xcodeproj">
             </BuildableReference>

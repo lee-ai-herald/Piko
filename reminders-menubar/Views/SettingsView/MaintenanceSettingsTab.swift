@@ -5,6 +5,7 @@ struct MaintenanceSettingsTab: View {
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
     @ObservedObject private var panelController = PinnedPanelController.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
+    @ObservedObject private var updateService = AppUpdateService.shared
 
     private var isAuthorized: Bool {
         RemindersService.shared.isAuthorized
@@ -228,40 +229,280 @@ struct MaintenanceSettingsTab: View {
                     }
                 }
 
-                SettingsCard(title: "关于") {
-                    HStack(spacing: 12) {
-                        PikoAppIconView(size: 38)
+                SettingsCard(title: "软件更新") {
+                    softwareUpdateCardContent
+                }
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(AppConstants.appName)
-                                .font(.system(size: 13.5, weight: .semibold))
-                                .foregroundColor(.primary)
-                            Text("轻量级 macOS 桌面工作台")
-                                .font(.system(size: 11.5))
+                SettingsCard(title: "关于") {
+                    VStack(spacing: 0) {
+                        HStack(spacing: 12) {
+                            PikoAppIconView(size: 38)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(AppConstants.appName)
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                Text("轻量级 macOS 桌面工作台 · by \(SocialConstants.authorName)")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Text(AppConstants.displayVersion)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
                                 .foregroundColor(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.primary.opacity(0.06)))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+
+                        Divider()
+                            .padding(.leading, 14)
+                            .opacity(0.42)
+
+                        SettingsRow(
+                            "小红书",
+                            subtitle: SocialConstants.authorName,
+                            showDivider: true
+                        ) {
+                            Button {
+                                if let url = URL(string: SocialConstants.xiaohongshuProfileURL) {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text("访问主页")
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 9, weight: .semibold))
+                                }
+                            }
+                            .controlSize(.small)
                         }
 
-                        Spacer()
-
-                        Text(AppConstants.displayVersion)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                        SettingsRow(
+                            "GitHub 仓库",
+                            subtitle: GithubConstants.repository,
+                            showDivider: false
+                        ) {
+                            Button {
+                                if let url = URL(string: GithubConstants.repositoryPage) {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text("打开主页")
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.system(size: 9, weight: .semibold))
+                                }
+                            }
+                            .controlSize(.small)
+                        }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
                 }
             }
             .padding(20)
         }
         .onAppear {
             if isAuthorized {
-                Task {
-                    await pinnedStore.refresh()
-                }
+                pinnedStore.requestRefresh()
             }
         }
+    }
+
+    // MARK: - Software Update Card
+
+    private var updateStatusTitle: String {
+        switch updateService.state {
+        case .available(let release):
+            return "发现新版本 \(release.displayVersion)"
+        case .downloading(let release, _, _, _):
+            return "正在下载 \(release.displayVersion)"
+        case .verifying(let release):
+            return "正在校验 \(release.displayVersion)"
+        case .installing(let release):
+            return "正在安装 \(release.displayVersion)"
+        default:
+            return "版本更新"
+        }
+    }
+
+    private var updateStatusSubtitle: String {
+        switch updateService.state {
+        case .idle:
+            if let lastChecked = updateService.lastCheckedDisplayText {
+                return "当前 \(AppConstants.displayVersion) · 上次检查：\(lastChecked)"
+            }
+            return "当前版本 \(AppConstants.displayVersion)"
+        case .checking:
+            return "正在连接 GitHub 检查最新版本…"
+        case .upToDate(let current):
+            return "已是最新版本（\(current)）"
+        case .available(let release):
+            return "当前 \(AppConstants.displayVersion) → 最新 \(release.displayVersion) · 支持一键下载并自动重启"
+        case .downloading(_, let progress, let written, let total):
+            let pct = Int((progress * 100).rounded())
+            if total > 0 {
+                return "\(pct)% · \(formatByteCount(written)) / \(formatByteCount(total))"
+            }
+            return "已下载 \(formatByteCount(written))"
+        case .verifying:
+            return "正在校验 SHA-256 哈希与签名完整性…"
+        case .installing:
+            return "校验通过，正在替换安装并自动重启 Piko…"
+        case .error:
+            return "当前版本 \(AppConstants.displayVersion)"
+        }
+    }
+
+    @ViewBuilder
+    private var softwareUpdateCardContent: some View {
+        SettingsRow(
+            updateStatusTitle,
+            subtitle: updateStatusSubtitle,
+            showDivider: true
+        ) {
+            updateActionControls
+        }
+
+        if case .available(let release) = updateService.state {
+            VStack(alignment: .leading, spacing: 6) {
+                if !release.summaryHighlights.isEmpty {
+                    ForEach(release.summaryHighlights, id: \.self) { line in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("•")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.accentColor)
+                            Text(line)
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                HStack {
+                    Button {
+                        updateService.openReleasePage(for: release)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text("在 GitHub 查看完整更新日志")
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+                }
+                .padding(.top, 2)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Color.accentColor.opacity(0.055))
+
+            Divider()
+                .padding(.leading, 14)
+                .opacity(0.42)
+        } else if case .downloading(_, let progress, _, _) = updateService.state {
+            ProgressView(value: progress)
+                .progressViewStyle(.linear)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+
+            Divider()
+                .padding(.leading, 14)
+                .opacity(0.42)
+        } else if case .error(let message, let release) = updateService.state {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 6)
+
+                Button("打开网页下载") {
+                    updateService.openReleasePage(for: release)
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8.5)
+            .background(Color.orange.opacity(0.07))
+
+            Divider()
+                .padding(.leading, 14)
+                .opacity(0.42)
+        }
+
+        SettingsRow(
+            "自动检查更新",
+            subtitle: "后台定期检测 GitHub Release 新版本，有更新时提示",
+            showDivider: false
+        ) {
+            Toggle("", isOn: $userPreferences.automaticallyCheckForUpdates)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+        }
+    }
+
+    @ViewBuilder
+    private var updateActionControls: some View {
+        switch updateService.state {
+        case .checking, .verifying, .installing:
+            ProgressView()
+                .controlSize(.small)
+        case .available(let release):
+            HStack(spacing: 6) {
+                Button(release.isDirectZipInstallable ? "下载并更新" : "前往下载") {
+                    updateService.downloadAndInstallUpdate()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        case .downloading:
+            Button("取消") {
+                updateService.cancelDownload()
+            }
+            .controlSize(.small)
+        case .error(_, let release):
+            HStack(spacing: 6) {
+                if let release, release.isDirectZipInstallable {
+                    Button("重试更新") {
+                        updateService.downloadAndInstallUpdate()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                } else {
+                    Button("重试检查") {
+                        Task {
+                            await updateService.checkForUpdates(userInitiated: true)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
+        case .idle, .upToDate:
+            Button("检查更新") {
+                Task {
+                    await updateService.checkForUpdates(userInitiated: true)
+                }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private func formatByteCount(_ bytes: Int64) -> String {
+        RmbFormatters.byteCount.string(fromByteCount: bytes)
     }
 }

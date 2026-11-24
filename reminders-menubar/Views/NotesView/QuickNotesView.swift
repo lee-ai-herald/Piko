@@ -140,15 +140,23 @@ struct QuickNotesView: View {
             Divider().opacity(0.38)
 
             if filteredNotes.isEmpty {
+                let emptyTitle: String = {
+                    if !searchText.isEmpty { return "没有找到匹配的随笔" }
+                    return showPinnedOnly ? "暂无已置顶随笔" : "暂无随笔记录"
+                }()
+                let emptySubtitle: String = {
+                    if !searchText.isEmpty { return "换个关键词试试" }
+                    return showPinnedOnly ? "点击便签右上角图钉可置顶常用便签" : "点击上方按钮新建一张便签"
+                }()
                 VStack(spacing: 8) {
                     Spacer()
-                    Image(systemName: "note.text")
+                    Image(systemName: showPinnedOnly && searchText.isEmpty ? "pin" : "note.text")
                         .font(.system(size: 24))
                         .foregroundColor(.secondary.opacity(0.55))
-                    Text(searchText.isEmpty ? "暂无随笔记录" : "没有找到匹配的随笔")
+                    Text(emptyTitle)
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundColor(.primary)
-                    Text(searchText.isEmpty ? "点击上方按钮新建一张便签" : "换个关键词试试")
+                    Text(emptySubtitle)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                     Spacer()
@@ -387,6 +395,7 @@ private struct NoteEditorPane: View {
     @ObservedObject private var store = QuickNotesStore.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
     @StateObject private var formattingController = NoteFormattingController()
+    @State private var editorId = UUID()
     @State private var titleText: String
     @State private var bodyText: String
     @State private var selectedText = ""
@@ -456,10 +465,13 @@ private struct NoteEditorPane: View {
                 isRichTextEnabled: true,
                 isLiveMarkdownEnabled: userPreferences.isNoteMarkdownEnabled,
                 isActive: isActiveTab,
+                noteRevision: liveNote.revision,
+                editorId: editorId,
+                lastEditOriginId: store.lastEditOriginByNoteId[note.id],
                 initialRTFData: liveNote.rtfData,
                 formattingController: formattingController,
                 onRichTextChanged: { plain, rtf in
-                    store.updateNote(id: note.id, content: plain, rtfData: .some(rtf))
+                    store.updateNote(id: note.id, content: plain, rtfData: .some(rtf), originEditorId: editorId)
                 },
                 onSelectionChanged: { selected in
                     selectedText = selected
@@ -481,6 +493,9 @@ private struct NoteEditorPane: View {
         }
         .onChange(of: liveNote.content) { external in
             if external != bodyText { bodyText = external }
+        }
+        .onDisappear {
+            store.flushPendingSave()
         }
     }
 
@@ -534,8 +549,7 @@ private struct NoteEditorPane: View {
                     .frame(width: 22, height: 22)
                     .contentShape(Circle())
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
+                .modifier(RmbPlainMenuStyle())
                 .fixedSize()
                 .help("切换便签颜色（当前：\(liveNote.colorTag.title)）")
             } else {
@@ -793,8 +807,7 @@ private struct NoteEditorPane: View {
                             )
                             .contentShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
+                    .modifier(RmbPlainMenuStyle())
                     .fixedSize()
                     .help("快速插入标题、待办勾选、引用与代码块")
                 }

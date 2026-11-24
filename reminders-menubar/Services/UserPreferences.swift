@@ -2,27 +2,19 @@ import SwiftUI
 
 private enum PreferencesKeys {
     static let reminderMenuBarIcon = "reminderMenuBarIcon"
-    static let calendarIdentifiersFilter = "calendarIdentifiersFilter"
     static let excludedReminderCalendarIdentifiers = "excludedReminderCalendarIdentifiers"
     static let calendarIdentifierForSaving = "calendarIdentifierForSaving"
     static let rmbColorScheme = "rmbColorScheme"
     static let preferTransparentBackground = "backgroundIsTransparent"
-    static let showUpcomingReminders = "showUpcomingReminders"
-    static let hideUpcomingRemindersFromLists = "hideUpcomingRemindersFromLists"
-    static let upcomingRemindersInterval = "upcomingRemindersInterval"
-    static let filterUpcomingRemindersByCalendar = "filterUpcomingRemindersByCalendar"
     static let menuBarCounterType = "menuBarCounterType"
-    static let filterMenuBarContentByCalendar = "filterMenuBarCountByCalendar"
     static let hideMenuBarIconWhenContentIsShown = "hideMenuBarIconWhenCounterIsShown"
     static let preferredLanguage = "preferredLanguage"
-    static let showUpcomingReminderListName = "showUpcomingReminderListName"
     static let showRemindersWithDueDateOnTop = "showRemindersWithDueDateOnTop"
     static let sortRemindersByFlagAndPriority = "sortRemindersByPriority"
     static let reminderSortingOrder = "reminderSortingOrder"
     static let timeFormatIs24Hour = "timeFormatIs24Hour"
     static let firstWeekday = "firstWeekday"
     static let showNotesInReminderItem = "showNotesInReminderItem"
-    static let pinnedReminderIds = "pinnedReminderIds"
     static let pinnedSchedules = "pinnedSchedules"
     static let pinnedPanelFrame = "pinnedPanelFrame"
     static let isPinnedPanelVisible = "isPinnedPanelVisible"
@@ -39,6 +31,8 @@ private enum PreferencesKeys {
     static let pomodoroShowInMenuBar = "pomodoroShowInMenuBar"
     static let pomodoroCompletedTodayDate = "pomodoroCompletedTodayDate"
     static let pomodoroCompletedTodayCount = "pomodoroCompletedTodayCount"
+    static let automaticallyCheckForUpdates = "automaticallyCheckForUpdates"
+    static let lastUpdateCheckTimestamp = "lastUpdateCheckTimestamp"
 }
 
 class UserPreferences: ObservableObject {
@@ -72,11 +66,6 @@ class UserPreferences: ObservableObject {
         didSet {
             Self.defaults.set(reminderMenuBarIcon.rawValue, forKey: PreferencesKeys.reminderMenuBarIcon)
         }
-    }
-
-    var preferredCalendarIdentifiersFilter: [String]? {
-        get { Self.defaults.stringArray(forKey: PreferencesKeys.calendarIdentifiersFilter) }
-        set { Self.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifiersFilter) }
     }
 
     /// Apple Reminders list identifiers explicitly excluded from Piko sync.
@@ -116,51 +105,6 @@ class UserPreferences: ObservableObject {
         excludedReminderCalendarIdentifiers.removeAll()
     }
 
-    @Published var upcomingRemindersInterval: ReminderInterval = {
-        guard let data = defaults.data(forKey: PreferencesKeys.upcomingRemindersInterval),
-              let interval = try? JSONDecoder().decode(ReminderInterval.self, from: data) else {
-            return .today
-        }
-        return interval
-    }() {
-        didSet {
-            let data = try? JSONEncoder().encode(upcomingRemindersInterval)
-            Self.defaults.set(data, forKey: PreferencesKeys.upcomingRemindersInterval)
-        }
-    }
-
-    @Published var filterUpcomingRemindersByCalendar: Bool = {
-        defaults.bool(forKey: PreferencesKeys.filterUpcomingRemindersByCalendar)
-    }() {
-        didSet {
-            Self.defaults.set(filterUpcomingRemindersByCalendar, forKey: PreferencesKeys.filterUpcomingRemindersByCalendar)
-        }
-    }
-
-    @Published var showUpcomingReminders: Bool = {
-        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showUpcomingReminders)
-    }() {
-        didSet {
-            Self.defaults.set(showUpcomingReminders, forKey: PreferencesKeys.showUpcomingReminders)
-        }
-    }
-
-    @Published var hideUpcomingRemindersFromLists: Bool = {
-        defaults.bool(forKey: PreferencesKeys.hideUpcomingRemindersFromLists)
-    }() {
-        didSet {
-            Self.defaults.set(hideUpcomingRemindersFromLists, forKey: PreferencesKeys.hideUpcomingRemindersFromLists)
-        }
-    }
-
-    @Published var showUpcomingReminderListName: Bool = {
-        defaults.bool(forKey: PreferencesKeys.showUpcomingReminderListName)
-    }() {
-        didSet {
-            Self.defaults.set(showUpcomingReminderListName, forKey: PreferencesKeys.showUpcomingReminderListName)
-        }
-    }
-
     @Published var showRemindersWithDueDateOnTop: Bool = {
         defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.showRemindersWithDueDateOnTop)
     }() {
@@ -198,12 +142,6 @@ class UserPreferences: ObservableObject {
         }
     }
 
-    var atLeastOneFilterIsSelected: Bool {
-        showUpcomingReminders ||
-        preferredCalendarIdentifiersFilter == nil ||
-        !(preferredCalendarIdentifiersFilter ?? []).isEmpty
-    }
-
     @Published var rmbColorScheme: RmbColorScheme = {
         guard let str = defaults.string(forKey: PreferencesKeys.rmbColorScheme) else {
             return .system
@@ -239,14 +177,6 @@ class UserPreferences: ObservableObject {
         didSet {
             let data = try? JSONEncoder().encode(menuBarCounterType)
             Self.defaults.set(data, forKey: PreferencesKeys.menuBarCounterType)
-        }
-    }
-
-    @Published var filterMenuBarContentByCalendar: Bool = {
-        defaults.bool(forKey: PreferencesKeys.filterMenuBarContentByCalendar)
-    }() {
-        didSet {
-            Self.defaults.set(filterMenuBarContentByCalendar, forKey: PreferencesKeys.filterMenuBarContentByCalendar)
         }
     }
 
@@ -375,11 +305,6 @@ class UserPreferences: ObservableObject {
 
     // MARK: - Pinned Board Persistence
 
-    var pinnedReminderIds: [String] {
-        get { Self.defaults.stringArray(forKey: PreferencesKeys.pinnedReminderIds) ?? [] }
-        set { Self.defaults.set(newValue, forKey: PreferencesKeys.pinnedReminderIds) }
-    }
-
     var pinnedSchedules: [String: PinnedTaskSchedule] {
         get {
             guard let data = Self.defaults.data(forKey: PreferencesKeys.pinnedSchedules),
@@ -442,5 +367,20 @@ class UserPreferences: ObservableObject {
         didSet {
             Self.defaults.set(completedTimeRange.rawValue, forKey: PreferencesKeys.completedTimeRange)
         }
+    }
+
+    // MARK: - App Updates
+
+    @Published var automaticallyCheckForUpdates: Bool = {
+        defaults.boolWithDefaultValueTrue(forKey: PreferencesKeys.automaticallyCheckForUpdates)
+    }() {
+        didSet {
+            Self.defaults.set(automaticallyCheckForUpdates, forKey: PreferencesKeys.automaticallyCheckForUpdates)
+        }
+    }
+
+    var lastUpdateCheckTimestamp: TimeInterval {
+        get { Self.defaults.double(forKey: PreferencesKeys.lastUpdateCheckTimestamp) }
+        set { Self.defaults.set(newValue, forKey: PreferencesKeys.lastUpdateCheckTimestamp) }
     }
 }

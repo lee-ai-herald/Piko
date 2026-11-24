@@ -9,17 +9,17 @@ final class QuickNotesStore: ObservableObject {
     @Published var selectedNoteId: UUID?
     @Published var lastCopiedNoteId: UUID?
 
+    /// Tracks which editor instance originated the most recent mutation to a note so that
+    /// the originating `NSTextView` skips redundant reloads while the paired window syncs full RTF.
+    private(set) var lastEditOriginByNoteId: [UUID: UUID] = [:]
+
     private var copiedToastWork: DispatchWorkItem?
-
-    private var storageDirectory: URL {
-        AppStoragePaths.applicationSupportDirectory
-    }
-
-    private var notesFileURL: URL {
-        storageDirectory.appendingPathComponent("quick_notes.json")
-    }
+    private var pendingSaveWork: DispatchWorkItem?
+    private let ioQueue = DispatchQueue(label: "piko.notes.io", qos: .utility)
+    private let notesFileURL: URL
 
     private init() {
+        self.notesFileURL = AppStoragePaths.applicationSupportDirectory.appendingPathComponent("quick_notes.json")
         loadFromDisk()
         selectedNoteId = sortedNotes.first?.id
     }
@@ -53,7 +53,7 @@ final class QuickNotesStore: ObservableObject {
         )
         notes.insert(note, at: 0)
         selectedNoteId = note.id
-        saveToDisk()
+        scheduleSave(immediate: true)
         return note
     }
 
@@ -62,10 +62,12 @@ final class QuickNotesStore: ObservableObject {
         title: String? = nil,
         content: String? = nil,
         rtfData: Data?? = nil,
-        colorTag: NoteColorTag? = nil
+        colorTag: NoteColorTag? = nil,
+        originEditorId: UUID? = nil
     ) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         var changed = false
+        var bodyChanged = false
         if let title, notes[index].title != title {
             notes[index].title = title
             changed = true
@@ -73,33 +75,44 @@ final class QuickNotesStore: ObservableObject {
         if let content, notes[index].content != content {
             notes[index].content = content
             changed = true
+            bodyChanged = true
         }
         if let rtfData, notes[index].rtfData != rtfData {
             notes[index].rtfData = rtfData
             changed = true
+            bodyChanged = true
         }
         if let colorTag, notes[index].colorTag != colorTag {
             notes[index].colorTag = colorTag
             changed = true
         }
         if changed {
+            if bodyChanged {
+                notes[index].revision += 1
+                if let originEditorId {
+                    lastEditOriginByNoteId[id] = originEditorId
+                } else {
+                    lastEditOriginByNoteId.removeValue(forKey: id)
+                }
+            }
             notes[index].updatedAt = Date()
-            saveToDisk()
+            scheduleSave(immediate: !bodyChanged)
         }
     }
 
     func togglePin(id: UUID) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].isPinned.toggle()
-        saveToDisk()
+        scheduleSave(immediate: true)
     }
 
     func deleteNote(id: UUID) {
         notes.removeAll { $0.id == id }
+        lastEditOriginByNoteId.removeValue(forKey: id)
         if selectedNoteId == id {
             selectedNoteId = sortedNotes.first?.id
         }
-        saveToDisk()
+        scheduleSave(immediate: true)
     }
 
     func copyNote(_ note: QuickNoteItem) {
@@ -123,65 +136,14 @@ final class QuickNotesStore: ObservableObject {
         writeToPasteboardAndToast(combined, noteId: note.id)
     }
 
-    func toggleCheckbox(inNoteId id: UUID, atLineIndex lineIndex: Int) {
-        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
-        var lines = notes[index].content.components(separatedBy: "\n")
-        guard lines.indices.contains(lineIndex) else { return }
-
-        let originalLine = lines[lineIndex]
-        let updatedLine: String
-        if let range = originalLine.range(of: "[ ]") {
-            updatedLine = originalLine.replacingCharacters(in: range, with: "[x]")
-        } else if let range = originalLine.range(of: "[x]") {
-            updatedLine = originalLine.replacingCharacters(in: range, with: "[ ]")
-        } else if let range = originalLine.range(of: "[X]") {
-            updatedLine = originalLine.replacingCharacters(in: range, with: "[ ]")
-        } else {
-            return
+    func flushPendingSave() {
+        pendingSaveWork?.cancel()
+        pendingSaveWork = nil
+        let snapshot = notes
+        let url = notesFileURL
+        ioQueue.sync {
+            Self.writeNotes(snapshot, to: url)
         }
-
-        lines[lineIndex] = updatedLine
-        let newPlain = lines.joined(separator: "\n")
-        notes[index].content = newPlain
-
-        // Also keep RTF text in sync if present
-        if let rtfData = notes[index].rtfData,
-           let mutable = NSMutableAttributedString(rtf: rtfData, documentAttributes: nil) {
-            let nsStr = mutable.string as NSString
-            var currentLine = 0
-            var loc = 0
-            while loc <= nsStr.length {
-                let lr = nsStr.lineRange(for: NSRange(location: loc, length: 0))
-                if currentLine == lineIndex {
-                    let sub = nsStr.substring(with: lr)
-                    let target: (String, String)? = {
-                        if sub.contains("[ ]") { return ("[ ]", "[x]") }
-                        if sub.contains("[x]") { return ("[x]", "[ ]") }
-                        if sub.contains("[X]") { return ("[X]", "[ ]") }
-                        return nil
-                    }()
-                    if let (from, to) = target {
-                        let found = (sub as NSString).range(of: from)
-                        if found.location != NSNotFound {
-                            let replaceRange = NSRange(location: lr.location + found.location, length: found.length)
-                            mutable.replaceCharacters(in: replaceRange, with: to)
-                            notes[index].rtfData = try? mutable.data(
-                                from: NSRange(location: 0, length: mutable.length),
-                                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-                            )
-                        }
-                    }
-                    break
-                }
-                let next = NSMaxRange(lr)
-                if next <= loc || next >= nsStr.length { break }
-                loc = next
-                currentLine += 1
-            }
-        }
-
-        notes[index].updatedAt = Date()
-        saveToDisk()
     }
 
     private func writeToPasteboardAndToast(_ text: String, noteId: UUID) {
@@ -212,8 +174,25 @@ final class QuickNotesStore: ObservableObject {
         notes = decoded
     }
 
-    private func saveToDisk() {
-        guard let data = try? JSONEncoder().encode(notes) else { return }
-        try? data.write(to: notesFileURL, options: .atomic)
+    private func scheduleSave(immediate: Bool) {
+        pendingSaveWork?.cancel()
+        let delay: TimeInterval = immediate ? 0.05 : 0.40
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let snapshot = self.notes
+                let url = self.notesFileURL
+                self.ioQueue.async {
+                    Self.writeNotes(snapshot, to: url)
+                }
+            }
+        }
+        pendingSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    nonisolated private static func writeNotes(_ snapshot: [QuickNoteItem], to url: URL) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 }

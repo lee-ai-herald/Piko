@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "PikoBuild",
     platforms: [
-        .macOS(.v12)
+        .macOS(.v13)
     ],
     dependencies: [
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "3.1.0")
@@ -26,14 +26,6 @@ let package = Package(
                 "Resources/Colors.xcassets",
                 "Resources/InfoPlist.xcstrings",
                 "Resources/Localizable.xcstrings"
-            ],
-            swiftSettings: [
-                .unsafeFlags(["-swift-version", "5"])
-            ],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"
-                ])
             ]
         )
     ]

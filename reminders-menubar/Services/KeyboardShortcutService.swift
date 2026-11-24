@@ -2,10 +2,17 @@ import SwiftUI
 import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
-    static let openRemindersMenuBar = Self("OpenRemindersMenuBar", initial: .init(.r, modifiers: [.command, .option]))
-    static let openClipboardHistory = Self("OpenClipboardHistory", initial: .init(.v, modifiers: [.command, .shift]))
-    static let openQuickNotes = Self("OpenQuickNotes", initial: .init(.n, modifiers: [.command, .option]))
-    static let toggleCornerMiniWindow = Self("ToggleCornerMiniWindow", initial: .init(.m, modifiers: [.command, .option]))
+    static let openRemindersMenuBar = Self("OpenRemindersMenuBar", initial: .init(.r, modifiers: [.control, .option]))
+    static let openClipboardHistory = Self("OpenClipboardHistory", initial: .init(.v, modifiers: [.control, .option]))
+    static let openQuickNotes = Self("OpenQuickNotes", initial: .init(.n, modifiers: [.control, .option]))
+    static let toggleCornerMiniWindow = Self("ToggleCornerMiniWindow", initial: .init(.m, modifiers: [.control, .option]))
+
+    static let allPikoActions: [(name: KeyboardShortcuts.Name, title: String)] = [
+        (.openRemindersMenuBar, "显示 / 隐藏窗口"),
+        (.openClipboardHistory, "剪贴板"),
+        (.openQuickNotes, "随笔"),
+        (.toggleCornerMiniWindow, "右上角小窗")
+    ]
 }
 
 private enum ShortcutsKeys {
@@ -60,6 +67,7 @@ class KeyboardShortcutService: ObservableObject {
     }
 
     func action(for shortcutName: KeyboardShortcuts.Name, action: @escaping () -> Void) {
+        KeyboardShortcuts.removeHandler(for: shortcutName)
         KeyboardShortcuts.onKeyDown(for: shortcutName) {
             action()
         }
@@ -68,6 +76,19 @@ class KeyboardShortcutService: ObservableObject {
 
     func reset(_ shortcutName: KeyboardShortcuts.Name) {
         KeyboardShortcuts.reset(shortcutName)
+        setEnabled(isEnabled(shortcutName), for: shortcutName)
+    }
+
+    func conflictingTitle(
+        for shortcut: KeyboardShortcuts.Shortcut,
+        excluding currentName: KeyboardShortcuts.Name
+    ) -> String? {
+        for entry in KeyboardShortcuts.Name.allPikoActions where entry.name != currentName {
+            if KeyboardShortcuts.getShortcut(for: entry.name) == shortcut {
+                return entry.title
+            }
+        }
+        return nil
     }
 
     private func isEnabled(_ shortcutName: KeyboardShortcuts.Name) -> Bool {

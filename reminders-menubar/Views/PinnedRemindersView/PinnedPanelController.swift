@@ -46,6 +46,14 @@ private final class ResizeHandleNSView: NSView {
     private var initialMouseScreenLocation: NSPoint = .zero
     private var initialWindowFrame: NSRect = .zero
 
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
         initialMouseScreenLocation = NSEvent.mouseLocation
@@ -96,9 +104,7 @@ private final class ShadowPassthroughContainerView: NSView {
         autoresizingMask = [.width, .height]
 
         let hostingView = NSHostingView(rootView: rootView)
-        if #available(macOS 13.0, *) {
-            hostingView.sizingOptions = []
-        }
+        hostingView.sizingOptions = []
         hostingView.wantsLayer = true
         hostingView.frame = bounds
         hostingView.autoresizingMask = [.width, .height]
@@ -156,9 +162,47 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
     private var isProgrammaticFrameUpdate = false
     private var modeTransitionToken = 0
     private var frameAnimationToken = 0
+    private var pendingFrameSaveWork: DispatchWorkItem?
+    private var pendingFrameToSave: NSRect?
+    private var screenObservers: [NSObjectProtocol] = []
 
     private override init() {
         super.init()
+        let screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.clampPanelsToVisibleScreens()
+            }
+        }
+        let wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.clampPanelsToVisibleScreens()
+            }
+        }
+        screenObservers = [screenObserver, wakeObserver]
+    }
+
+    deinit {
+        for observer in screenObservers {
+            NotificationCenter.default.removeObserver(observer)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
+
+    func flushPendingFrameSave() {
+        pendingFrameSaveWork?.cancel()
+        pendingFrameSaveWork = nil
+        if let frame = pendingFrameToSave {
+            pendingFrameToSave = nil
+            UserPreferences.shared.pinnedPanelFrame = frame
+        }
     }
 
     private func paddedWindowFrame(for cardFrame: NSRect) -> NSRect {
@@ -467,7 +511,9 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         resetLayerImmediately(of: miniPanel)
         if let mainPanel {
             if !isCornerMiniMode && mainPanel.isVisible {
-                persistCurrentFrame(for: mainPanel)
+                persistCurrentFrame(for: mainPanel, immediate: true)
+            } else {
+                flushPendingFrameSave()
             }
             mainPanel.orderOut(nil)
             mainPanel.alphaValue = 1
@@ -490,13 +536,20 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         PinnedRemindersStore.shared.isPanelVisible = true
 
         let visibleFrame = defaultScreenVisibleFrame()
-        let size = Self.defaultSize
-        let targetCardFrame = NSRect(
-            x: visibleFrame.maxX - size.width - Self.defaultScreenInset,
-            y: visibleFrame.maxY - size.height - Self.defaultScreenInset,
-            width: size.width,
-            height: size.height
+        let rawTarget = NSRect(
+            x: visibleFrame.maxX - Self.defaultSize.width - Self.defaultScreenInset,
+            y: visibleFrame.maxY - Self.defaultSize.height - Self.defaultScreenInset,
+            width: Self.defaultSize.width,
+            height: Self.defaultSize.height
         )
+        let targetCardFrame = clampedCardFrame(
+            rawTarget,
+            minSize: Self.minExpandedSize,
+            maxSize: Self.maxExpandedSize
+        )
+        pendingFrameSaveWork?.cancel()
+        pendingFrameSaveWork = nil
+        pendingFrameToSave = nil
         UserPreferences.shared.pinnedPanelFrame = targetCardFrame
         expandedCardFrameBeforeSpecialMode = targetCardFrame
 
@@ -534,7 +587,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         if !isCornerMiniMode {
             if let previousMainPanel, !PinnedRemindersStore.shared.isCollapsed {
                 expandedCardFrameBeforeSpecialMode = cardFrame(from: previousMainPanel.frame)
-                persistCurrentFrame(for: previousMainPanel)
+                persistCurrentFrame(for: previousMainPanel, immediate: true)
             }
             isCornerMiniMode = true
         }
@@ -668,7 +721,14 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         let token = nextModeTransitionToken()
         frameAnimationToken += 1
         let main = ensureMainPanel()
-        let targetCardFrame = expandedCardFrameBeforeSpecialMode ?? restoredCardFrame()
+        let rawTargetCard = expandedCardFrameBeforeSpecialMode ?? restoredCardFrame()
+        let targetCardFrame = clampedCardFrame(
+            rawTargetCard,
+            minSize: Self.minExpandedSize,
+            maxSize: Self.maxExpandedSize,
+            preferredScreen: outgoingMini?.screen ?? main.screen
+        )
+        expandedCardFrameBeforeSpecialMode = targetCardFrame
         let targetWindowFrame = paddedWindowFrame(for: targetCardFrame)
 
         isProgrammaticFrameUpdate = true
@@ -782,8 +842,9 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
                 max: Self.maxMiniListSize.width
             )
             let fixedCardSize = NSSize(width: clampedWidth, height: Self.miniPomodoroHeight)
-            panel.minSize = paddedSize(for: fixedCardSize)
-            panel.maxSize = paddedSize(for: NSSize(width: Self.maxMiniListSize.width, height: Self.miniPomodoroHeight))
+            let paddedFixed = paddedSize(for: fixedCardSize)
+            panel.minSize = paddedFixed
+            panel.maxSize = paddedFixed
         } else {
             panel.minSize = paddedSize(for: Self.minMiniListSize)
             panel.maxSize = paddedSize(for: Self.maxMiniListSize)
@@ -806,6 +867,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
                 expandedCardFrameBeforeSpecialMode = currentCard
             }
             mainPanel.minSize = paddedSize(for: NSSize(width: Self.minExpandedSize.width, height: Self.collapsedHeight))
+            mainPanel.maxSize = paddedSize(for: NSSize(width: Self.maxExpandedSize.width, height: Self.collapsedHeight))
             newCardFrame = NSRect(
                 x: topLeft.x,
                 y: topLeft.y - Self.collapsedHeight,
@@ -813,10 +875,12 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
                 height: Self.collapsedHeight
             )
         } else {
-            let savedHeight = expandedCardFrameBeforeSpecialMode?.height ?? Self.defaultSize.height
-            let targetHeight = max(Self.minExpandedSize.height, savedHeight)
-            mainPanel.minSize = paddedSize(for: Self.minExpandedSize)
             let screenFrame = currentVisibleFrame(for: mainPanel)
+            let savedHeight = expandedCardFrameBeforeSpecialMode?.height ?? Self.defaultSize.height
+            let maxAllowedHeight = min(Self.maxExpandedSize.height, screenFrame.height)
+            let targetHeight = max(min(Self.minExpandedSize.height, maxAllowedHeight), min(savedHeight, maxAllowedHeight))
+            mainPanel.minSize = paddedSize(for: Self.minExpandedSize)
+            mainPanel.maxSize = paddedSize(for: Self.maxExpandedSize)
             let originY = (topLeft.y - targetHeight).constrainedTo(
                 min: screenFrame.minY,
                 max: max(screenFrame.minY, screenFrame.maxY - targetHeight)
@@ -834,8 +898,10 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             return
         }
         guard let mainPanel else { return }
-        expandedCardFrameBeforeSpecialMode = cardFrame(from: mainPanel.frame)
-        persistCurrentFrame(for: mainPanel)
+        if !PinnedRemindersStore.shared.isCollapsed {
+            expandedCardFrameBeforeSpecialMode = cardFrame(from: mainPanel.frame)
+        }
+        persistCurrentFrame(for: mainPanel, immediate: true)
     }
 
     // MARK: - NSWindowDelegate
@@ -843,8 +909,15 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
     func windowDidMove(_ notification: Notification) {
         guard !isProgrammaticFrameUpdate else { return }
         guard let window = notification.object as? NSPanel, window === mainPanel else { return }
-        expandedCardFrameBeforeSpecialMode = cardFrame(from: window.frame)
-        persistCurrentFrame(for: window)
+        let currentCard = cardFrame(from: window.frame)
+        if !PinnedRemindersStore.shared.isCollapsed {
+            expandedCardFrameBeforeSpecialMode = currentCard
+        } else if var saved = expandedCardFrameBeforeSpecialMode {
+            saved.origin.x = currentCard.origin.x
+            saved.origin.y = currentCard.maxY - saved.height
+            expandedCardFrameBeforeSpecialMode = saved
+        }
+        persistCurrentFrame(for: window, immediate: false)
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -860,7 +933,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             if !PinnedRemindersStore.shared.isCollapsed {
                 expandedCardFrameBeforeSpecialMode = cardFrame(from: window.frame)
             }
-            persistCurrentFrame(for: window)
+            persistCurrentFrame(for: window, immediate: false)
         }
     }
 
@@ -949,49 +1022,132 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
 
     // MARK: - Frame helpers
 
-    private func persistCurrentFrame(for panel: NSPanel) {
+    private func persistCurrentFrame(for panel: NSPanel, immediate: Bool = false) {
         var frameToSave = cardFrame(from: panel.frame)
         if PinnedRemindersStore.shared.isCollapsed {
             let expandedHeight = max(Self.minExpandedSize.height, expandedCardFrameBeforeSpecialMode?.height ?? Self.defaultSize.height)
             frameToSave.origin.y = frameToSave.maxY - expandedHeight
             frameToSave.size.height = expandedHeight
         }
-        UserPreferences.shared.pinnedPanelFrame = frameToSave
+
+        pendingFrameSaveWork?.cancel()
+        pendingFrameSaveWork = nil
+
+        if immediate {
+            pendingFrameToSave = nil
+            UserPreferences.shared.pinnedPanelFrame = frameToSave
+            return
+        }
+
+        pendingFrameToSave = frameToSave
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, let pending = self.pendingFrameToSave else { return }
+                self.pendingFrameToSave = nil
+                self.pendingFrameSaveWork = nil
+                UserPreferences.shared.pinnedPanelFrame = pending
+            }
+        }
+        pendingFrameSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func clampPanelsToVisibleScreens() {
+        if let expanded = expandedCardFrameBeforeSpecialMode {
+            expandedCardFrameBeforeSpecialMode = clampedCardFrame(
+                expanded,
+                minSize: Self.minExpandedSize,
+                maxSize: Self.maxExpandedSize
+            )
+        }
+
+        if let mainPanel, mainPanel.isVisible {
+            let curCard = cardFrame(from: mainPanel.frame)
+            let isCollapsed = PinnedRemindersStore.shared.isCollapsed
+            let minSz = isCollapsed
+                ? NSSize(width: Self.minExpandedSize.width, height: Self.collapsedHeight)
+                : Self.minExpandedSize
+            let maxSz = isCollapsed
+                ? NSSize(width: Self.maxExpandedSize.width, height: Self.collapsedHeight)
+                : Self.maxExpandedSize
+            let clamped = clampedCardFrame(curCard, minSize: minSz, maxSize: maxSz, preferredScreen: mainPanel.screen)
+            let targetWin = paddedWindowFrame(for: clamped)
+            if abs(mainPanel.frame.minX - targetWin.minX) > 1
+                || abs(mainPanel.frame.minY - targetWin.minY) > 1
+                || abs(mainPanel.frame.width - targetWin.width) > 1
+                || abs(mainPanel.frame.height - targetWin.height) > 1 {
+                isProgrammaticFrameUpdate = true
+                mainPanel.setFrame(targetWin, display: true)
+                isProgrammaticFrameUpdate = false
+                persistCurrentFrame(for: mainPanel, immediate: true)
+            }
+        }
+
+        if let miniPanel, miniPanel.isVisible {
+            let curCard = cardFrame(from: miniPanel.frame)
+            let tab = PinnedRemindersStore.shared.activeTab
+            let minSz = tab == .pomodoro
+                ? NSSize(width: curCard.width, height: Self.miniPomodoroHeight)
+                : Self.minMiniListSize
+            let maxSz = tab == .pomodoro
+                ? NSSize(width: curCard.width, height: Self.miniPomodoroHeight)
+                : Self.maxMiniListSize
+            let clamped = clampedCardFrame(curCard, minSize: minSz, maxSize: maxSz, preferredScreen: miniPanel.screen)
+            let targetWin = paddedWindowFrame(for: clamped)
+            if abs(miniPanel.frame.minX - targetWin.minX) > 1
+                || abs(miniPanel.frame.minY - targetWin.minY) > 1
+                || abs(miniPanel.frame.width - targetWin.width) > 1
+                || abs(miniPanel.frame.height - targetWin.height) > 1 {
+                isProgrammaticFrameUpdate = true
+                miniPanel.setFrame(targetWin, display: true)
+                isProgrammaticFrameUpdate = false
+            }
+        }
+    }
+
+    private func clampedCardFrame(
+        _ frame: NSRect,
+        minSize: NSSize,
+        maxSize: NSSize,
+        preferredScreen: NSScreen? = nil
+    ) -> NSRect {
+        let targetScreen = NSScreen.screens.first { screen in
+            screen.visibleFrame.contains(NSPoint(x: frame.midX, y: frame.maxY - 20))
+        } ?? preferredScreen ?? NSScreen.main
+
+        let screenFrame = targetScreen?.visibleFrame ?? defaultScreenVisibleFrame()
+        let allowedMaxW = min(maxSize.width, max(200, screenFrame.width))
+        let allowedMaxH = min(maxSize.height, max(Self.collapsedHeight, screenFrame.height))
+        let allowedMinW = min(minSize.width, allowedMaxW)
+        let allowedMinH = min(minSize.height, allowedMaxH)
+
+        let width = frame.width.constrainedTo(min: allowedMinW, max: allowedMaxW)
+        let height = frame.height.constrainedTo(min: allowedMinH, max: allowedMaxH)
+
+        let originX = frame.minX.constrainedTo(
+            min: screenFrame.minX,
+            max: max(screenFrame.minX, screenFrame.maxX - width)
+        )
+        let originY = frame.minY.constrainedTo(
+            min: screenFrame.minY,
+            max: max(screenFrame.minY, screenFrame.maxY - height)
+        )
+        return NSRect(x: originX, y: originY, width: width, height: height)
     }
 
     private func restoredCardFrame() -> NSRect {
-        let visibleFrame = defaultScreenVisibleFrame()
-
         if let saved = UserPreferences.shared.pinnedPanelFrame {
-            let width = max(Self.minExpandedSize.width, saved.width).constrainedTo(
-                min: Self.minExpandedSize.width,
-                max: Self.maxExpandedSize.width
-            )
-            let height = max(Self.minExpandedSize.height, saved.height).constrainedTo(
-                min: Self.minExpandedSize.height,
-                max: Self.maxExpandedSize.height
-            )
-
-            let targetScreen = NSScreen.screens.first { screen in
-                screen.visibleFrame.contains(NSPoint(x: saved.midX, y: saved.maxY - 20))
-            } ?? NSScreen.main
-
-            let screenFrame = targetScreen?.visibleFrame ?? visibleFrame
-            let originX = saved.minX.constrainedTo(
-                min: screenFrame.minX,
-                max: max(screenFrame.minX, screenFrame.maxX - width)
-            )
-            let originY = saved.minY.constrainedTo(
-                min: screenFrame.minY,
-                max: max(screenFrame.minY, screenFrame.maxY - height)
-            )
-            return NSRect(x: originX, y: originY, width: width, height: height)
+            return clampedCardFrame(saved, minSize: Self.minExpandedSize, maxSize: Self.maxExpandedSize)
         }
 
-        let size = Self.defaultSize
-        let originX = visibleFrame.maxX - size.width - Self.defaultScreenInset
-        let originY = visibleFrame.maxY - size.height - Self.defaultScreenInset
-        return NSRect(origin: NSPoint(x: originX, y: originY), size: size)
+        let visibleFrame = defaultScreenVisibleFrame()
+        let rawDefault = NSRect(
+            x: visibleFrame.maxX - Self.defaultSize.width - Self.defaultScreenInset,
+            y: visibleFrame.maxY - Self.defaultSize.height - Self.defaultScreenInset,
+            width: Self.defaultSize.width,
+            height: Self.defaultSize.height
+        )
+        return clampedCardFrame(rawDefault, minSize: Self.minExpandedSize, maxSize: Self.maxExpandedSize)
     }
 
     private func currentVisibleFrame(for panel: NSPanel) -> NSRect {

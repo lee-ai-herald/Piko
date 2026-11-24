@@ -33,14 +33,45 @@ struct ReminderEditView: View {
 
     @State private var showingRemoveAlert = false
 
-    private let durationChoices = [30, 60, 90, 120, 180]
-    private let recurrenceChoices: [(option: RmbRecurrenceOption, label: String)] = [
+    private let initialHasDate: Bool
+    private let initialStartDate: Date
+    private let initialEndDate: Date
+    private let initialRecurrence: RmbRecurrenceOption
+    private let initialStartDateKey: String?
+
+    private let baseDurationChoices = [30, 60, 90, 120, 180]
+    private let baseRecurrenceChoices: [(option: RmbRecurrenceOption, label: String)] = [
         (.none, "不重复"),
         (.daily, "每天"),
         (.weekly, "每周"),
         (.monthly, "每月"),
         (.yearly, "每年")
     ]
+
+    private var slotStartMinuteChoices: [Int] {
+        var values = Array(stride(from: 7 * 60, through: 22 * 60 + 45, by: 15))
+        if !values.contains(slotStartMinute) {
+            values.append(slotStartMinute)
+            values.sort()
+        }
+        return values
+    }
+
+    private var durationChoices: [Int] {
+        var values = baseDurationChoices
+        if !values.contains(slotDurationMinutes) {
+            values.append(slotDurationMinutes)
+            values.sort()
+        }
+        return values
+    }
+
+    private var recurrenceChoices: [(option: RmbRecurrenceOption, label: String)] {
+        if recurrence == .custom {
+            return baseRecurrenceChoices + [(.custom, "自定义")]
+        }
+        return baseRecurrenceChoices
+    }
 
     private var reminderHasChildren: Bool {
         if case .edit(_, let hasChildren) = mode {
@@ -70,14 +101,22 @@ struct ReminderEditView: View {
         _notes = State(initialValue: reminder.notes ?? "")
         _priority = State(initialValue: reminder.ekPriority)
         _selectedCalendar = State(initialValue: reminder.calendar)
-        _recurrence = State(initialValue: RmbRecurrenceOption(from: reminder.recurrenceRules))
+        let initialRecurrenceOption = RmbRecurrenceOption(from: reminder.recurrenceRules)
+        _recurrence = State(initialValue: initialRecurrenceOption)
 
-        let resolvedStart = Calendar.current.startOfDay(for: sched.startDate ?? reminder.dueDateComponents?.date ?? Date())
+        let resolvedStart = Calendar.current.startOfDay(for: sched.startDate ?? reminder.resolvedDueDate ?? Date())
         let resolvedEnd = Calendar.current.date(byAdding: .day, value: max(0, sched.spanDays - 1), to: resolvedStart) ?? resolvedStart
-        _hasDate = State(initialValue: sched.startDate != nil || reminder.dueDateComponents?.date != nil)
+        let initialDateExists = sched.startDate != nil || reminder.resolvedDueDate != nil
+        _hasDate = State(initialValue: initialDateExists)
         _startDate = State(initialValue: resolvedStart)
         _endDate = State(initialValue: resolvedEnd)
         _calendarMonth = State(initialValue: resolvedStart)
+
+        self.initialHasDate = initialDateExists
+        self.initialStartDate = resolvedStart
+        self.initialEndDate = resolvedEnd
+        self.initialRecurrence = initialRecurrenceOption
+        self.initialStartDateKey = initialDateExists ? PinnedTaskSchedule.dateKey(for: resolvedStart) : nil
 
         let targetKey = PinnedTaskSchedule.dateKey(for: resolvedStart)
         if let slot = sched.daySlots[targetKey] {
@@ -116,6 +155,12 @@ struct ReminderEditView: View {
         _startDate = State(initialValue: today)
         _endDate = State(initialValue: today)
         _calendarMonth = State(initialValue: today)
+
+        self.initialHasDate = false
+        self.initialStartDate = today
+        self.initialEndDate = today
+        self.initialRecurrence = .none
+        self.initialStartDateKey = nil
 
         let curHour = Calendar.current.component(.hour, from: Date())
         _hasTimeSlot = State(initialValue: false)
@@ -434,7 +479,7 @@ struct ReminderEditView: View {
                         if hasTimeSlot {
                             HStack(spacing: 8) {
                                 Picker("", selection: $slotStartMinute) {
-                                    ForEach(Array(stride(from: 7 * 60, through: 22 * 60 + 30, by: 30)), id: \.self) { min in
+                                    ForEach(slotStartMinuteChoices, id: \.self) { min in
                                         Text(DayTimeSlot.formatMinute(min)).tag(min)
                                     }
                                 }
@@ -600,9 +645,7 @@ struct ReminderEditView: View {
     }
 
     private func formatMonthDay(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "M月d日"
-        return f.string(from: date)
+        RmbFormatters.monthDayChinese.string(from: date)
     }
 
     // MARK: - Save
@@ -611,16 +654,34 @@ struct ReminderEditView: View {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        let cal = Calendar.current
         let finalSpan = computedSpanDays
+        let finalRecurrence: RmbRecurrenceOption = hasDate ? recurrence : .none
+
+        let dateChanged: Bool = {
+            if isCreateMode {
+                return hasDate
+            }
+            if hasDate != initialHasDate {
+                return true
+            }
+            guard hasDate else { return false }
+            return !cal.isDate(startDate, inSameDayAs: initialStartDate)
+                || !cal.isDate(endDate, inSameDayAs: initialEndDate)
+        }()
+
+        let recurrenceChanged: Bool = isCreateMode
+            ? (hasDate && finalRecurrence != .none)
+            : (finalRecurrence != initialRecurrence)
 
         var draft = RmbReminder()
         draft.title = trimmed
         draft.notes = notes
         draft.priority = priority
         draft.calendar = selectedCalendar ?? pinnedStore.defaultSavingCalendar ?? RemindersService.shared.getDefaultCalendar()
-        draft.hasDateChanges = true
-        draft.hasRecurrenceChanges = true
-        draft.recurrence = hasDate ? recurrence : .none
+        draft.hasDateChanges = dateChanged
+        draft.hasRecurrenceChanges = recurrenceChanged
+        draft.recurrence = finalRecurrence
         draft.hasDueDate = hasDate
         draft.hasTime = false
         draft.date = endDate
@@ -638,6 +699,13 @@ struct ReminderEditView: View {
         }
 
         if hasDate {
+            let newStartKey = PinnedTaskSchedule.dateKey(for: startDate)
+            if let oldKey = initialStartDateKey,
+               oldKey != newStartKey,
+               let oldDate = PinnedTaskSchedule.date(fromKey: oldKey) {
+                pinnedStore.clearTimeSlot(for: targetId, on: oldDate)
+            }
+
             pinnedStore.setDaySpan(
                 for: targetId,
                 startDate: startDate,
@@ -675,9 +743,7 @@ private struct RangeCalendarPickerView: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
 
     private var monthHeaderText: String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy年 M月"
-        return f.string(from: displayedMonth)
+        RmbFormatters.yearMonthChinese.string(from: displayedMonth)
     }
 
     private var dayCells: [Date?] {

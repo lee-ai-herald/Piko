@@ -29,7 +29,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © Rafael Damasceno, GNU General Public License v3.</string>
+	<string>Copyright © Piko / Rafael Damasceno, GNU General Public License v3.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
@@ -39,14 +39,6 @@
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/DamascenoRafael/reminders-menubar/master/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>mlItEoQkNMuqmwMD76ZCJfJX/l24/P8YjsuLXBBLEds=</string>
-	<key>SUEnableInstallerLauncherService</key>
-	<true/>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 </dict>
 </plist>

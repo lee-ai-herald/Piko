@@ -6,6 +6,7 @@ import EventKit
 @MainActor
 struct CornerMiniWindowView: View {
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
+    @ObservedObject private var panelController = PinnedPanelController.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
     @State private var editingItem: ReminderItem?
     @State private var mountedMiniTabs: Set<BoardTab> = [.board]
@@ -36,7 +37,9 @@ struct CornerMiniWindowView: View {
                         }
                         if mountedMiniTabs.contains(.notes) {
                             miniTabLayer(isActive: pinnedStore.activeTab == .notes, size: contentGeo.size) {
-                                MiniQuickNotesView(isActiveTab: pinnedStore.activeTab == .notes)
+                                MiniQuickNotesView(
+                                    isActiveTab: pinnedStore.activeTab == .notes && panelController.isCornerMiniMode
+                                )
                             }
                         }
                     }
@@ -184,10 +187,11 @@ private struct CornerMiniTabButton: View {
     let pillNamespace: Namespace.ID
     let action: () -> Void
 
+    @ObservedObject private var pomodoro = PomodoroService.shared
     @State private var isHovered = false
 
     private var activeAccent: Color {
-        tab == .pomodoro ? PomodoroService.shared.phase.accentColor : tab.accentColor
+        tab == .pomodoro ? pomodoro.phase.accentColor : tab.accentColor
     }
 
     var body: some View {
@@ -624,9 +628,7 @@ private struct MiniTaskChecklistRow: View {
         if Calendar.current.isDateInTomorrow(start) {
             return "明天"
         }
-        let f = DateFormatter()
-        f.dateFormat = "M/d"
-        return f.string(from: start)
+        return RmbFormatters.monthDay.string(from: start)
     }
 
     var body: some View {
@@ -764,13 +766,6 @@ private struct MiniPomodoroCornerContent: View {
 
     private var accent: Color { pomodoro.phase.accentColor }
 
-    private var endTimeLabel: String {
-        let finish = Date().addingTimeInterval(TimeInterval(pomodoro.remainingSeconds))
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return "预计 \(f.string(from: finish)) 结束"
-    }
-
     var body: some View {
         ZStack(alignment: .bottom) {
             LinearGradient(
@@ -781,39 +776,17 @@ private struct MiniPomodoroCornerContent: View {
             .allowsHitTesting(false)
 
             HStack(spacing: 12) {
-                Button {
+                MiniPomodoroRingButton(
+                    ticker: pomodoro.ticker,
+                    isRunning: pomodoro.isRunning,
+                    accent: accent
+                ) {
                     pomodoro.toggleStartPause()
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(accent.opacity(pomodoro.isRunning ? 0.15 : 0.10))
-
-                        Circle()
-                            .stroke(Color.primary.opacity(0.09), lineWidth: 3.5)
-
-                        Circle()
-                            .trim(from: 0, to: max(0.015, pomodoro.progress))
-                            .stroke(accent, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                            .animation(.linear(duration: 0.25), value: pomodoro.progress)
-
-                        Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
-                            .font(.system(size: 13.5, weight: .bold))
-                            .foregroundColor(accent)
-                            .offset(x: pomodoro.isRunning ? 0 : 1)
-                    }
-                    .frame(width: 46, height: 46)
-                    .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .help(pomodoro.isRunning ? "暂停计时" : "开始计时")
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .center, spacing: 6) {
-                        Text(pomodoro.formattedTime)
-                            .font(.system(size: 27, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(.primary)
+                        MiniPomodoroTimeLabel(ticker: pomodoro.ticker)
 
                         Menu {
                             ForEach(PomodoroPhase.allCases) { phase in
@@ -833,7 +806,7 @@ private struct MiniPomodoroCornerContent: View {
                             .padding(.vertical, 2.5)
                             .background(Capsule().fill(accent.opacity(0.14)))
                         }
-                        .modifier(CornerMiniPlainMenuStyle())
+                        .modifier(RmbPlainMenuStyle())
                         .fixedSize()
                         .help("切换专注或休息阶段")
                     }
@@ -867,9 +840,7 @@ private struct MiniPomodoroCornerContent: View {
                             .padding(.vertical, 2)
                             .background(Capsule().fill(Color.primary.opacity(0.065)))
                         } else {
-                            Text(endTimeLabel)
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundColor(.secondary)
+                            MiniPomodoroEndTimeLabel(ticker: pomodoro.ticker)
                         }
                     }
                 }
@@ -889,32 +860,85 @@ private struct MiniPomodoroCornerContent: View {
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Rectangle().fill(Color.primary.opacity(0.06))
-                    Rectangle()
-                        .fill(accent)
-                        .frame(width: geo.size.width * pomodoro.progress)
-                        .animation(.linear(duration: 0.25), value: pomodoro.progress)
-                }
-            }
-            .frame(height: 2.5)
-            .allowsHitTesting(false)
+            MiniPomodoroBottomProgressBar(ticker: pomodoro.ticker, accent: accent)
         }
     }
 }
 
-private struct CornerMiniPlainMenuStyle: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 13.0, *) {
-            content
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-        } else {
-            content
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
+@MainActor
+private struct MiniPomodoroRingButton: View {
+    @ObservedObject var ticker: PomodoroTicker
+    let isRunning: Bool
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(accent.opacity(isRunning ? 0.15 : 0.10))
+
+                Circle()
+                    .stroke(Color.primary.opacity(0.09), lineWidth: 3.5)
+
+                Circle()
+                    .trim(from: 0, to: max(0.015, ticker.progress))
+                    .stroke(accent, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.25), value: ticker.progress)
+
+                Image(systemName: isRunning ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13.5, weight: .bold))
+                    .foregroundColor(accent)
+                    .offset(x: isRunning ? 0 : 1)
+            }
+            .frame(width: 46, height: 46)
+            .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .help(isRunning ? "暂停计时" : "开始计时")
+    }
+}
+
+@MainActor
+private struct MiniPomodoroTimeLabel: View {
+    @ObservedObject var ticker: PomodoroTicker
+
+    var body: some View {
+        Text(ticker.formattedTime)
+            .font(.system(size: 27, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundColor(.primary)
+    }
+}
+
+@MainActor
+private struct MiniPomodoroEndTimeLabel: View {
+    @ObservedObject var ticker: PomodoroTicker
+
+    var body: some View {
+        Text(ticker.estimatedFinishTimeText)
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundColor(.secondary)
+    }
+}
+
+@MainActor
+private struct MiniPomodoroBottomProgressBar: View {
+    @ObservedObject var ticker: PomodoroTicker
+    let accent: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Color.primary.opacity(0.06))
+                Rectangle()
+                    .fill(accent)
+                    .frame(width: geo.size.width * ticker.progress)
+                    .animation(.linear(duration: 0.25), value: ticker.progress)
+            }
+        }
+        .frame(height: 2.5)
+        .allowsHitTesting(false)
     }
 }

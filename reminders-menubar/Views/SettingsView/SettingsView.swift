@@ -30,6 +30,7 @@ enum SettingsTab: String, CaseIterable, Identifiable, Hashable {
 struct SettingsView: View {
     @ObservedObject private var coordinator = SettingsCoordinator.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
+    @ObservedObject private var updateService = AppUpdateService.shared
 
     var body: some View {
         HStack(spacing: 0) {
@@ -80,7 +81,8 @@ struct SettingsView: View {
                 ForEach(SettingsTab.allCases) { tab in
                     SettingsSidebarItem(
                         tab: tab,
-                        isSelected: coordinator.selectedTab == tab
+                        isSelected: coordinator.selectedTab == tab,
+                        showBadgeDot: tab == .maintenance && updateService.hasAvailableUpdate
                     ) {
                         coordinator.selectedTab = tab
                     }
@@ -96,6 +98,7 @@ struct SettingsView: View {
 private struct SettingsSidebarItem: View {
     let tab: SettingsTab
     let isSelected: Bool
+    var showBadgeDot: Bool = false
     let action: () -> Void
 
     @State private var isHovered = false
@@ -113,6 +116,12 @@ private struct SettingsSidebarItem: View {
                     .foregroundColor(isSelected ? .primary : .secondary)
 
                 Spacer()
+
+                if showBadgeDot {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 6.5, height: 6.5)
+                }
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 6.5)

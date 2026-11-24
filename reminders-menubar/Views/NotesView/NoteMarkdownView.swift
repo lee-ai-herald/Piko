@@ -151,6 +151,20 @@ enum NoteMarkdownConverter {
         return rgb.redComponent > 0.8 && rgb.greenComponent > 0.65 && rgb.blueComponent < 0.45
     }
 
+    private static let headingPrefixRegex = try? NSRegularExpression(pattern: #"^#{1,6}\s+"#)
+    private static let inlineStripRegexes: [(NSRegularExpression, String)] = [
+        (#"\*\*(.+?)\*\*"#, "$1"),
+        (#"__(.+?)__"#, "$1"),
+        (#"~~(.+?)~~"#, "$1"),
+        (#"==(.+?)=="#, "$1"),
+        (#"<u>(.+?)</u>"#, "$1"),
+        (#"`([^`]+)`"#, "$1"),
+        (#"\[([^\]]+)\]\([^)]+\)"#, "$1")
+    ].compactMap { pattern, template in
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        return (regex, template)
+    }
+
     /// Strips visual/Markdown list markers for clean sidebar card titles and snippets.
     static func strippedPlainText(_ text: String) -> String {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -162,22 +176,11 @@ enum NoteMarkdownConverter {
             s = String(s.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
             break
         }
-        if let regex = try? NSRegularExpression(pattern: #"^#{1,6}\s+"#) {
+        if let regex = headingPrefixRegex {
             s = regex.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: (s as NSString).length), withTemplate: "")
         }
-        let inlineReplacements: [(String, String)] = [
-            (#"\*\*(.+?)\*\*"#, "$1"),
-            (#"__(.+?)__"#, "$1"),
-            (#"~~(.+?)~~"#, "$1"),
-            (#"==(.+?)=="#, "$1"),
-            (#"<u>(.+?)</u>"#, "$1"),
-            (#"`([^`]+)`"#, "$1"),
-            (#"\[([^\]]+)\]\([^)]+\)"#, "$1")
-        ]
-        for (pattern, template) in inlineReplacements {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                s = regex.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: (s as NSString).length), withTemplate: template)
-            }
+        for (regex, template) in inlineStripRegexes {
+            s = regex.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: (s as NSString).length), withTemplate: template)
         }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }

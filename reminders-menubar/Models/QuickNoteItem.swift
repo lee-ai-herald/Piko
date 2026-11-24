@@ -47,13 +47,31 @@ enum NoteColorTag: String, Codable, CaseIterable, Identifiable {
 
 struct QuickNoteItem: Identifiable, Codable, Equatable {
     let id: UUID
-    var title: String
-    var content: String
+    var title: String {
+        didSet { recomputeDerivedText() }
+    }
+    var content: String {
+        didSet { recomputeDerivedText() }
+    }
     var rtfData: Data?
     var colorTag: NoteColorTag
     var isPinned: Bool
     var createdAt: Date
     var updatedAt: Date
+    var revision: Int = 0
+    private(set) var displayTitle: String
+    private(set) var previewText: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case content
+        case rtfData
+        case colorTag
+        case isPinned
+        case createdAt
+        case updatedAt
+    }
 
     init(
         id: UUID = UUID(),
@@ -63,7 +81,8 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         colorTag: NoteColorTag = .yellow,
         isPinned: Bool = false,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        revision: Int = 0
     ) {
         self.id = id
         self.title = title
@@ -73,32 +92,56 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         self.isPinned = isPinned
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.revision = revision
+        let computed = Self.computeDisplayAndPreview(title: title, content: content)
+        self.displayTitle = computed.title
+        self.previewText = computed.preview
     }
 
-    var displayTitle: String {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedTitle.isEmpty {
-            return trimmedTitle
-        }
-        let firstLine = content
-            .split(whereSeparator: \.isNewline)
-            .map { NoteMarkdownConverter.strippedPlainText(String($0)) }
-            .first(where: { !$0.isEmpty })
-        return firstLine ?? "空白随笔"
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(UUID.self, forKey: .id)
+        let title = try container.decode(String.self, forKey: .title)
+        let content = try container.decode(String.self, forKey: .content)
+        let rtfData = try container.decodeIfPresent(Data.self, forKey: .rtfData)
+        let colorTag = try container.decode(NoteColorTag.self, forKey: .colorTag)
+        let isPinned = try container.decode(Bool.self, forKey: .isPinned)
+        let createdAt = try container.decode(Date.self, forKey: .createdAt)
+        let updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.init(
+            id: id,
+            title: title,
+            content: content,
+            rtfData: rtfData,
+            colorTag: colorTag,
+            isPinned: isPinned,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 
-    var previewText: String {
+    private mutating func recomputeDerivedText() {
+        let computed = Self.computeDisplayAndPreview(title: title, content: content)
+        displayTitle = computed.title
+        previewText = computed.preview
+    }
+
+    private static func computeDisplayAndPreview(title: String, content: String) -> (title: String, preview: String) {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = content
             .split(whereSeparator: \.isNewline)
+            .prefix(12)
             .map { NoteMarkdownConverter.strippedPlainText(String($0)) }
             .filter { !$0.isEmpty }
 
         if trimmedTitle.isEmpty {
+            let resolvedTitle = lines.first ?? "空白随笔"
             let remaining = Array(lines.dropFirst())
-            return remaining.isEmpty ? "暂无更多内容" : remaining.joined(separator: " ")
+            let preview = remaining.isEmpty ? "暂无更多内容" : remaining.joined(separator: " ")
+            return (resolvedTitle, preview)
         } else {
-            return lines.isEmpty ? "暂无正文内容" : lines.joined(separator: " ")
+            let preview = lines.isEmpty ? "暂无正文内容" : lines.joined(separator: " ")
+            return (trimmedTitle, preview)
         }
     }
 
@@ -131,9 +174,7 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         } else if seconds < 86_400 {
             return "\(seconds / 3_600) 小时前"
         } else {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "M/d HH:mm"
-            return formatter.string(from: updatedAt)
+            return RmbFormatters.monthDayTime.string(from: updatedAt)
         }
     }
 }

@@ -9,6 +9,27 @@ struct ToolsSettingsTab: View {
         clipboardStore.items.filter(\.isPinned).count
     }
 
+    private var focusDurationOptions: [Int] {
+        Self.mergedOptions([15, 20, 25, 30, 45, 60], including: userPreferences.pomodoroFocusMinutes)
+    }
+
+    private var shortBreakDurationOptions: [Int] {
+        Self.mergedOptions([3, 5, 8, 10], including: userPreferences.pomodoroShortBreakMinutes)
+    }
+
+    private var longBreakDurationOptions: [Int] {
+        Self.mergedOptions([10, 15, 20, 30], including: userPreferences.pomodoroLongBreakMinutes)
+    }
+
+    private static func mergedOptions(_ defaults: [Int], including current: Int) -> [Int] {
+        var values = defaults
+        if current > 0 && !values.contains(current) {
+            values.append(current)
+            values.sort()
+        }
+        return values
+    }
+
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 16) {
@@ -17,7 +38,7 @@ struct ToolsSettingsTab: View {
                 SettingsCard(title: "番茄钟") {
                     SettingsRow("专注时长") {
                         Picker("", selection: $userPreferences.pomodoroFocusMinutes) {
-                            ForEach([15, 20, 25, 30, 45, 60], id: \.self) { mins in
+                            ForEach(focusDurationOptions, id: \.self) { mins in
                                 Text("\(mins) 分钟").tag(mins)
                             }
                         }
@@ -29,7 +50,7 @@ struct ToolsSettingsTab: View {
 
                     SettingsRow("短休息") {
                         Picker("", selection: $userPreferences.pomodoroShortBreakMinutes) {
-                            ForEach([3, 5, 8, 10], id: \.self) { mins in
+                            ForEach(shortBreakDurationOptions, id: \.self) { mins in
                                 Text("\(mins) 分钟").tag(mins)
                             }
                         }
@@ -41,7 +62,7 @@ struct ToolsSettingsTab: View {
 
                     SettingsRow("长休息", subtitle: "每完成 4 轮专注后触发") {
                         Picker("", selection: $userPreferences.pomodoroLongBreakMinutes) {
-                            ForEach([10, 15, 20, 30], id: \.self) { mins in
+                            ForEach(longBreakDurationOptions, id: \.self) { mins in
                                 Text("\(mins) 分钟").tag(mins)
                             }
                         }

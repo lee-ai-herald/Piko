@@ -190,6 +190,9 @@ struct PinnedTaskSchedule: Codable, Equatable {
     }
 
     func covers(date: Date) -> Bool {
+        if daySlots[Self.dateKey(for: date)] != nil {
+            return true
+        }
         guard let start = startDate, let end = endDate else { return false }
         let cal = Calendar.current
         let target = cal.startOfDay(for: date)
@@ -198,12 +201,10 @@ struct PinnedTaskSchedule: Codable, Equatable {
 
     var daySpanLabel: String? {
         guard let start = startDate, let end = endDate else { return nil }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "M/d"
         if spanDays <= 1 {
-            return "\(formatter.string(from: start)) · 1天"
+            return "\(RmbFormatters.monthDay.string(from: start)) · 1天"
         }
-        return "\(formatter.string(from: start))–\(formatter.string(from: end)) · \(spanDays)天"
+        return "\(RmbFormatters.monthDay.string(from: start))–\(RmbFormatters.monthDay.string(from: end)) · \(spanDays)天"
     }
 
     static func dateKey(for date: Date) -> String {

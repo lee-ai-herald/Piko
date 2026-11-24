@@ -1,6 +1,14 @@
 import SwiftUI
 import EventKit
 
+struct MonthViewportFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero { value = next }
+    }
+}
+
 struct MonthCellFramesKey: PreferenceKey {
     static var defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
@@ -21,9 +29,7 @@ struct MonthCalendarScaleView: View {
     private let gridColumns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
 
     private var monthTitle: String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy年 M月"
-        return f.string(from: pinnedStore.displayedMonthDate)
+        RmbFormatters.yearMonthChinese.string(from: pinnedStore.displayedMonthDate)
     }
 
     private var calendarCells: [Date?] {
@@ -51,6 +57,9 @@ struct MonthCalendarScaleView: View {
     }
 
     var body: some View {
+        let displayedYear = Calendar.current.component(.year, from: pinnedStore.displayedMonthDate)
+        let itemsByDateKey = pinnedStore.itemsByDateKey(forYear: displayedYear)
+
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
@@ -83,7 +92,8 @@ struct MonthCalendarScaleView: View {
                 LazyVGrid(columns: gridColumns, spacing: 4) {
                     ForEach(Array(calendarCells.enumerated()), id: \.offset) { _, maybeDate in
                         if let date = maybeDate {
-                            monthDayCell(for: date)
+                            let dateKey = PinnedTaskSchedule.dateKey(for: date)
+                            monthDayCell(for: date, dateKey: dateKey, tasks: itemsByDateKey[dateKey] ?? [])
                         } else {
                             Color.clear.frame(height: 44)
                         }
@@ -94,20 +104,26 @@ struct MonthCalendarScaleView: View {
                 Divider().opacity(0.35).padding(.horizontal, 10)
 
                 // Selected Day Tasks List
-                selectedDayTasksSection
+                selectedDayTasksSection(items: itemsByDateKey[pinnedStore.selectedDateKey] ?? pinnedStore.itemsCovering(date: pinnedStore.selectedDate))
                     .padding(.horizontal, 12)
                     .padding(.bottom, 12)
             }
         }
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: MonthViewportFrameKey.self,
+                    value: proxy.frame(in: .named("tripleBoardRoot"))
+                )
+            }
+        )
     }
 
-    private func monthDayCell(for date: Date) -> some View {
+    private func monthDayCell(for date: Date, dateKey: String, tasks: [ReminderItem]) -> some View {
         let cal = Calendar.current
-        let dateKey = PinnedTaskSchedule.dateKey(for: date)
         let isToday = cal.isDateInToday(date)
         let isSelected = cal.isDate(date, inSameDayAs: pinnedStore.selectedDate)
         let isDropTarget = hoveredDropDateKey == dateKey
-        let tasks = pinnedStore.itemsCovering(date: date)
         let dayNum = cal.component(.day, from: date)
 
         let dominantColor: Color? = tasks
@@ -173,11 +189,8 @@ struct MonthCalendarScaleView: View {
         )
     }
 
-    private var selectedDayTasksSection: some View {
-        let items = pinnedStore.itemsCovering(date: pinnedStore.selectedDate)
-        let f = DateFormatter()
-        f.dateFormat = "M月d日"
-        let dayStr = f.string(from: pinnedStore.selectedDate)
+    private func selectedDayTasksSection(items: [ReminderItem]) -> some View {
+        let dayStr = RmbFormatters.monthDayChinese.string(from: pinnedStore.selectedDate)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -271,6 +284,7 @@ struct YearHeatmapScaleView: View {
     var body: some View {
         let year = pinnedStore.displayedYear
         let yearTasks = pinnedStore.itemsInYear(year)
+        let itemsByDateKey = pinnedStore.itemsByDateKey(forYear: year)
 
         GeometryReader { geo in
             let colCount = geo.size.width < 290 ? 2 : 3
@@ -299,7 +313,7 @@ struct YearHeatmapScaleView: View {
                     // Adaptive 2x6 or 3x4 Mini Month Heatmaps
                     LazyVGrid(columns: monthColumns, spacing: 8) {
                         ForEach(1...12, id: \.self) { month in
-                            miniMonthHeatmapCard(year: year, month: month)
+                            miniMonthHeatmapCard(year: year, month: month, itemsByDateKey: itemsByDateKey)
                         }
                     }
                     .padding(.horizontal, 10)
@@ -320,11 +334,7 @@ struct YearHeatmapScaleView: View {
                         } else {
                             ForEach(yearTasks, id: \.item.id) { entry in
                                 let color = entry.item.reminder.ekPriority.quadrantColor
-                                let f = DateFormatter()
-                                let dateLabel: String = {
-                                    f.dateFormat = "M/d"
-                                    return f.string(from: entry.startDate)
-                                }()
+                                let dateLabel = RmbFormatters.monthDay.string(from: entry.startDate)
 
                                 HStack(spacing: 7) {
                                     Circle()
@@ -369,7 +379,11 @@ struct YearHeatmapScaleView: View {
         }
     }
 
-    private func miniMonthHeatmapCard(year: Int, month: Int) -> some View {
+    private func miniMonthHeatmapCard(
+        year: Int,
+        month: Int,
+        itemsByDateKey: [String: [ReminderItem]]
+    ) -> some View {
         let cal = Calendar.current
         var comps = DateComponents()
         comps.year = year
@@ -401,7 +415,8 @@ struct YearHeatmapScaleView: View {
             LazyVGrid(columns: miniCols, spacing: 2) {
                 ForEach(Array(cells.enumerated()), id: \.offset) { _, maybeDate in
                     if let date = maybeDate {
-                        let tasks = pinnedStore.itemsCovering(date: date)
+                        let dateKey = PinnedTaskSchedule.dateKey(for: date)
+                        let tasks = itemsByDateKey[dateKey] ?? []
                         let isToday = cal.isDateInToday(date)
                         let isSelected = cal.isDate(date, inSameDayAs: pinnedStore.selectedDate)
                         let cellColor = heatmapColor(for: tasks)

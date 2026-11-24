@@ -27,7 +27,10 @@ struct ClipboardHistoryView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 6) {
                         ForEach(filteredItems) { item in
-                            ClipboardItemRow(item: item)
+                            ClipboardItemRow(
+                                item: item,
+                                isJustCopied: store.lastCopiedItemId == item.id
+                            )
                         }
                     }
                     .padding(.horizontal, 10)
@@ -98,15 +101,24 @@ struct ClipboardHistoryView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 8) {
+        let title: String = {
+            if !searchText.isEmpty { return "没有找到匹配的记录" }
+            return showPinnedOnly ? "暂无已收藏记录" : "暂无剪贴板历史"
+        }()
+        let subtitle: String = {
+            if !searchText.isEmpty { return "换个关键词试试" }
+            return showPinnedOnly ? "悬停记录后点击星标即可收藏置顶" : "平时按 ⌘C 复制文字或图片后会自动记录在这里"
+        }()
+
+        return VStack(spacing: 8) {
             Spacer()
-            Image(systemName: "doc.on.clipboard")
+            Image(systemName: showPinnedOnly && searchText.isEmpty ? "star" : "doc.on.clipboard")
                 .font(.system(size: 28))
                 .foregroundColor(.secondary.opacity(0.6))
-            Text(searchText.isEmpty ? "暂无剪贴板历史" : "没有找到匹配的记录")
+            Text(title)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.primary)
-            Text(searchText.isEmpty ? "平时按 ⌘C 复制文字或图片后会自动记录在这里" : "换个关键词试试")
+            Text(subtitle)
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
             Spacer()
@@ -119,12 +131,12 @@ struct ClipboardHistoryView: View {
 @MainActor
 private struct ClipboardItemRow: View {
     let item: ClipboardItem
+    let isJustCopied: Bool
 
-    @ObservedObject private var store = ClipboardHistoryStore.shared
     @State private var isHovered = false
 
-    private var isJustCopied: Bool {
-        store.lastCopiedItemId == item.id
+    private var store: ClipboardHistoryStore {
+        ClipboardHistoryStore.shared
     }
 
     var body: some View {
@@ -233,7 +245,7 @@ private struct ClipboardItemRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .image(let fileName, let width, let height):
             HStack(spacing: 8) {
-                if let nsImage = store.image(for: fileName) {
+                if let nsImage = store.thumbnail(for: fileName) {
                     Image(nsImage: nsImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)

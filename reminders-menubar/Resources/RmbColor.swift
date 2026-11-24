@@ -1,92 +1,29 @@
+import AppKit
 import SwiftUI
 
 enum RmbColor {
-    // Transparency-adaptive
     case backgroundTheme(isTransparent: Bool)
-    case textFieldBackground(isTransparent: Bool)
-    // Fixed
-    case buttonHover
-    case borderContrast
-    case tagHighlight
-    case dateHighlight
-    case priorityHighlight
-    case urgentHighlight
-    case flaggedHighlight
-    case prioritySelectedBackground
-    case urgentActive
-    case flaggedActive
-    case confirmButtonBackground
-    case upcomingSectionTitle
-    case recentSectionTitle
-    case expiredDate
-    case destructiveAction
-    case successIndicator
+
+    private static let dynamicBackgroundNSColor = NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        if isDark {
+            return NSColor(srgbRed: 0.118, green: 0.118, blue: 0.118, alpha: 1.0)
+        }
+        return NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1.0)
+    }
 
     var color: Color {
         switch self {
         case .backgroundTheme(let isTransparent):
-            return adaptiveColor(
-                "backgroundTheme",
-                isTransparent: isTransparent
-            )
-        case .textFieldBackground(let isTransparent):
-            return adaptiveColor(
-                "textFieldBackground",
-                isTransparent: isTransparent,
-                transparentVariant: "textFieldBackgroundTransparent"
-            )
-        case .buttonHover:
-            return Color("buttonHover")
-        case .borderContrast:
-            return Color("borderContrast")
-        case .tagHighlight:
-            return .purple
-        case .dateHighlight:
-            return .blue
-        case .priorityHighlight:
-            return .red
-        case .urgentHighlight:
-            return .purple
-        case .flaggedHighlight:
-            return .orange
-        case .prioritySelectedBackground:
-            return .accentColor.opacity(0.4)
-        case .urgentActive:
-            return .purple
-        case .flaggedActive:
-            return .orange
-        case .confirmButtonBackground:
-            return .accentColor
-        case .upcomingSectionTitle:
-            return .red
-        case .recentSectionTitle:
-            return .red
-        case .expiredDate:
-            return .red
-        case .destructiveAction:
-            return .red
-        case .successIndicator:
-            return .green
+            let base = Color(nsColor: Self.dynamicBackgroundNSColor)
+            return isTransparent ? base.opacity(0.3) : base
         }
     }
 
     var nsColor: NSColor {
-        NSColor(color)
-    }
-
-    private func adaptiveColor(
-        _ name: String,
-        isTransparent: Bool,
-        transparentVariant: String? = nil
-    ) -> Color {
-        guard isTransparent else {
-            return Color(name)
+        switch self {
+        case .backgroundTheme(let isTransparent):
+            return isTransparent ? Self.dynamicBackgroundNSColor.withAlphaComponent(0.3) : Self.dynamicBackgroundNSColor
         }
-
-        if let transparentVariant {
-            return Color(transparentVariant)
-        }
-
-        return Color(name).opacity(0.3)
     }
 }

@@ -59,6 +59,9 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
     var isRichTextEnabled: Bool = false
     var isLiveMarkdownEnabled: Bool = false
     var isActive: Bool = true
+    var noteRevision: Int = 0
+    var editorId: UUID = UUID()
+    var lastEditOriginId: UUID? = nil
     var initialRTFData: Data? = nil
     var formattingController: NoteFormattingController? = nil
     var onRichTextChanged: ((String, Data?) -> Void)? = nil
@@ -109,6 +112,9 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         textView.onFormatChanged = { [weak coordinator = context.coordinator] in
             coordinator?.syncRichTextAndFormat(from: textView)
         }
+        textView.onTypingFormatChanged = { [weak coordinator = context.coordinator] in
+            coordinator?.syncFormatState(from: textView)
+        }
 
         if isRichTextEnabled, let rtf = initialRTFData,
            let normalized = Self.normalizedAttributedString(fromRTF: rtf, fontSize: fontSize, lineSpacing: lineSpacing) {
@@ -119,6 +125,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: baseAttrs))
             context.coordinator.lastSyncedPlainText = text
         }
+        context.coordinator.lastSyncedRevision = noteRevision
 
         textView.typingAttributes = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
         formattingController?.textView = textView
@@ -136,6 +143,9 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
         let shouldBeHidden = !isActive
         if scrollView.isHidden != shouldBeHidden || textView.isTabActive != isActive {
+            if !isActive, textView.window?.firstResponder === textView {
+                textView.window?.makeFirstResponder(nil)
+            }
             scrollView.isHidden = shouldBeHidden
             textView.isTabActive = isActive
             scrollView.window?.invalidateCursorRects(for: scrollView)
@@ -150,7 +160,46 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         formattingController?.textView = textView
 
         // Never overwrite while user is composing with IME (e.g. Chinese Pinyin)
-        if !textView.hasMarkedText(), textView.string != text {
+        guard !textView.hasMarkedText() else { return }
+
+        if isRichTextEnabled {
+            if lastEditOriginId == editorId {
+                context.coordinator.lastSyncedRevision = noteRevision
+                return
+            }
+
+            let needsExternalSync = (noteRevision != context.coordinator.lastSyncedRevision)
+                || (textView.string != text)
+            guard needsExternalSync else { return }
+
+            let savedSelection = textView.selectedRanges
+            if let rtf = initialRTFData,
+               let normalized = Self.normalizedAttributedString(
+                   fromRTF: rtf,
+                   fontSize: fontSize,
+                   lineSpacing: lineSpacing
+               ) {
+                textView.textStorage?.setAttributedString(normalized)
+            } else {
+                let baseAttrs = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
+                textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: baseAttrs))
+            }
+            context.coordinator.lastSyncedPlainText = textView.string
+            context.coordinator.lastSyncedRevision = noteRevision
+
+            let maxLen = textView.textStorage?.length ?? 0
+            let clamped = savedSelection.compactMap { value -> NSValue? in
+                let r = value.rangeValue
+                let loc = min(r.location, maxLen)
+                let len = min(r.length, maxLen - loc)
+                return NSValue(range: NSRange(location: loc, length: len))
+            }
+            if !clamped.isEmpty {
+                textView.selectedRanges = clamped
+            }
+            formattingController?.activeFormat = textView.currentFormatState()
+            textView.needsDisplay = true
+        } else if textView.string != text {
             let savedSelection = textView.selectedRanges
             let baseAttrs = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
             textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: baseAttrs))
@@ -180,6 +229,8 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         textView.placeholderFont = resolvedFont
         textView.placeholderParagraphStyle = paragraphStyle
         textView.insertionPointColor = .controlAccentColor
+
+        guard !textView.hasMarkedText() else { return }
 
         if !isRichTextEnabled {
             textView.font = resolvedFont
@@ -294,12 +345,16 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             let bgColor = attrs[.backgroundColor] as? NSColor
             let isYellow = NoteMarkdownConverter.isYellowHighlightColor(bgColor)
 
-            // Preserve heading sizes cleanly while normalizing body font size
+            let trimmedChunk = chunk.trimmingCharacters(in: .whitespaces)
+            let isCheckboxGlyph = trimmedChunk == "☐" || trimmedChunk == "☑"
+
+            // Preserve heading sizes cleanly while keeping checkbox glyphs distinct from H3
             let resolvedSize: CGFloat = {
+                if isCheckboxGlyph { return fontSize + 0.8 }
                 guard let pt = font?.pointSize else { return fontSize }
                 if pt >= fontSize + 4.5 { return fontSize + 5.5 }
                 if pt >= fontSize + 2.2 { return fontSize + 3.0 }
-                if pt >= fontSize + 1.0 { return fontSize + 1.5 }
+                if pt >= fontSize + 1.2 { return fontSize + 1.5 }
                 return fontSize
             }()
 
@@ -313,8 +368,11 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             }
 
             let resolvedFG: NSColor = {
-                if chunk.trimmingCharacters(in: .whitespaces) == "▎" || chunk.trimmingCharacters(in: .whitespaces) == "☑" {
+                if trimmedChunk == "▎" || trimmedChunk == "☑" {
                     return .controlAccentColor
+                }
+                if trimmedChunk == "☐" {
+                    return .secondaryLabelColor
                 }
                 if lineStr.hasPrefix("────") {
                     return .tertiaryLabelColor
@@ -358,6 +416,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PlaceholderNoteTextView
         var lastSyncedPlainText = ""
+        var lastSyncedRevision = 0
         private var lastReportedSelection = ""
 
         init(_ parent: PlaceholderNoteTextView) {
@@ -366,9 +425,10 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? PlaceholderNSTextView else { return }
+            textView.needsDisplay = true
+            guard !textView.hasMarkedText() else { return }
             textView.processLiveMarkdownIfNeeded()
             syncRichTextAndFormat(from: textView)
-            textView.needsDisplay = true
             reportSelection(for: textView)
         }
 
@@ -391,7 +451,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             syncFormatState(from: textView)
         }
 
-        private func syncFormatState(from textView: PlaceholderNSTextView) {
+        func syncFormatState(from textView: PlaceholderNSTextView) {
             guard let controller = parent.formattingController else { return }
             let state = textView.currentFormatState()
             Task { @MainActor in
@@ -456,6 +516,31 @@ final class PlaceholderNSTextView: NSTextView {
     var isTabActive: Bool = true
     var onSendSelectionToBoard: ((String, Bool) -> Void)?
     var onFormatChanged: (() -> Void)?
+    var onTypingFormatChanged: (() -> Void)?
+
+    private enum InlineRule {
+        case bold
+        case highlight
+        case strikethrough
+        case inlineCode
+        case italic
+    }
+
+    private static let inlineMarkdownRules: [(NSRegularExpression, InlineRule)] = {
+        let specs: [(String, InlineRule)] = [
+            (#"(?<!\*)\*\*([^*\n]+?)\*\*$"#, .bold),
+            (#"==([^=\n]+?)==$"#, .highlight),
+            (#"~~([^~\n]+?)~~$"#, .strikethrough),
+            (#"`([^`\n]+?)`$"#, .inlineCode),
+            (#"(?<!\*)\*([^*\s\n](?:[^*\n]*?[^*\s\n])?)\*$"#, .italic)
+        ]
+        return specs.compactMap { pattern, rule in
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            return (regex, rule)
+        }
+    }()
+
+    private static let numberedListRegex = try? NSRegularExpression(pattern: #"^(\d+)\.\s+"#)
 
     override func resetCursorRects() {
         guard isTabActive, !isHiddenOrHasHiddenAncestor else { return }
@@ -613,25 +698,8 @@ final class PlaceholderNSTextView: NSTextView {
         let nsLine = lineBeforeCaret as NSString
         let fullRange = NSRange(location: 0, length: nsLine.length)
 
-        enum InlineRule {
-            case bold
-            case highlight
-            case strikethrough
-            case inlineCode
-            case italic
-        }
-
-        let rules: [(String, InlineRule)] = [
-            (#"(?<!\*)\*\*([^*\n]+?)\*\*$"#, .bold),
-            (#"==([^=\n]+?)==$"#, .highlight),
-            (#"~~([^~\n]+?)~~$"#, .strikethrough),
-            (#"`([^`\n]+?)`$"#, .inlineCode),
-            (#"(?<!\*)\*([^*\s\n](?:[^*\n]*?[^*\s\n])?)\*$"#, .italic)
-        ]
-
-        for (pattern, rule) in rules {
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: lineBeforeCaret, range: fullRange),
+        for (regex, rule) in Self.inlineMarkdownRules {
+            guard let match = regex.firstMatch(in: lineBeforeCaret, range: fullRange),
                   match.numberOfRanges >= 2 else {
                 continue
             }
@@ -640,10 +708,36 @@ final class PlaceholderNSTextView: NSTextView {
             let innerText = nsLine.substring(with: match.range(at: 1))
             guard !innerText.isEmpty else { continue }
 
-            var styledAttrs = clean
+            // Preserve line-level context (heading size, quote color, paragraph style) when applying inline syntax.
+            let existingAttrs = matchRangeInDoc.location < storage.length
+                ? storage.attributes(at: matchRangeInDoc.location, effectiveRange: nil)
+                : clean
+            let existingFont = existingAttrs[.font] as? NSFont
+            let activeSize = existingFont?.pointSize ?? baseFontSize
+            let existingTraits = existingFont.map { NSFontManager.shared.traits(of: $0) } ?? []
+            let existingBold = existingTraits.contains(.boldFontMask)
+            let existingItalic = existingTraits.contains(.italicFontMask)
+                || (((existingAttrs[.obliqueness] as? NSNumber)?.doubleValue ?? 0) > 0.05)
+
+            var contextBase = clean
+            if let fg = existingAttrs[.foregroundColor] {
+                contextBase[.foregroundColor] = fg
+            }
+            if let para = existingAttrs[.paragraphStyle] {
+                contextBase[.paragraphStyle] = para
+            }
+            if let existingFont {
+                contextBase[.font] = existingFont
+            }
+
+            var styledAttrs = contextBase
             switch rule {
             case .bold:
-                styledAttrs[.font] = PlaceholderNoteTextView.resolvedFont(size: baseFontSize, isBold: true, isItalic: false)
+                styledAttrs[.font] = PlaceholderNoteTextView.resolvedFont(
+                    size: activeSize,
+                    isBold: true,
+                    isItalic: existingItalic
+                )
             case .highlight:
                 styledAttrs[.backgroundColor] = PlaceholderNoteTextView.highlightYellowColor
             case .strikethrough:
@@ -653,8 +747,15 @@ final class PlaceholderNSTextView: NSTextView {
                     baseFontSize: baseFontSize,
                     lineSpacing: baseLineSpacing
                 )
+                if let para = existingAttrs[.paragraphStyle] {
+                    styledAttrs[.paragraphStyle] = para
+                }
             case .italic:
-                styledAttrs[.font] = PlaceholderNoteTextView.resolvedFont(size: baseFontSize, isBold: false, isItalic: true)
+                styledAttrs[.font] = PlaceholderNoteTextView.resolvedFont(
+                    size: activeSize,
+                    isBold: existingBold,
+                    isItalic: true
+                )
                 styledAttrs[.obliqueness] = NSNumber(value: Double(PlaceholderNoteTextView.chineseItalicObliqueness))
             }
 
@@ -664,8 +765,9 @@ final class PlaceholderNSTextView: NSTextView {
                 didChangeText()
                 let caretPos = matchRangeInDoc.location + styled.length
                 setSelectedRange(NSRange(location: caretPos, length: 0))
-                // Reset typingAttributes so subsequent typing is clean body text
-                typingAttributes = clean
+                // Continue typing in the line's surrounding style (e.g. heading/quote) without bleeding inline style
+                typingAttributes = contextBase
+                onTypingFormatChanged?()
             }
             return
         }
@@ -714,44 +816,46 @@ final class PlaceholderNSTextView: NSTextView {
         let offsetInLine = charIndex - lineRange.location
         guard offsetInLine <= 1 else { return false }
 
-        let glyphRect = layoutManager.boundingRect(
-            forGlyphRange: NSRange(location: lineRange.location, length: 1),
-            in: textContainer
-        )
+        // Convert UTF-16 character range to glyph range so preceding emoji/surrogate pairs never crash layoutManager.
+        let charRange = NSRange(location: lineRange.location, length: 1)
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return false }
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
         let expandedHitRect = glyphRect.insetBy(dx: -5, dy: -3)
         guard expandedHitRect.contains(pointInContainer) else { return false }
 
         let nextChecked = isUnchecked
-        let symbolRange = NSRange(location: lineRange.location, length: 1)
-        let newSymbol = nextChecked ? "☑" : "☐"
+        let trimmedContentLen = (lineStr.trimmingCharacters(in: .newlines) as NSString).length
+        guard trimmedContentLen >= 2 else { return false }
+        let targetRange = NSRange(location: lineRange.location, length: trimmedContentLen)
+        guard NSMaxRange(targetRange) <= storage.length else { return false }
 
-        guard shouldChangeText(in: lineRange, replacementString: nil) else { return false }
-
-        storage.beginEditing()
+        let updatedLine = NSMutableAttributedString(attributedString: storage.attributedSubstring(from: targetRange))
         let symbolAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: baseFontSize + 1),
+            .font: NSFont.systemFont(ofSize: baseFontSize + 0.8),
             .foregroundColor: nextChecked ? NSColor.controlAccentColor : NSColor.secondaryLabelColor,
             .paragraphStyle: checkboxParagraphStyle()
         ]
-        storage.replaceCharacters(in: symbolRange, with: NSAttributedString(string: newSymbol, attributes: symbolAttrs))
+        updatedLine.replaceCharacters(
+            in: NSRange(location: 0, length: 1),
+            with: NSAttributedString(string: nextChecked ? "☑" : "☐", attributes: symbolAttrs)
+        )
 
-        let trimmedContentLen = (lineStr.trimmingCharacters(in: .newlines) as NSString).length
-        let bodyStart = lineRange.location + 2
         let bodyLen = max(0, trimmedContentLen - 2)
-        if bodyLen > 0, bodyStart + bodyLen <= storage.length {
-            let bodyRange = NSRange(location: bodyStart, length: bodyLen)
+        if bodyLen > 0 {
+            let localBodyRange = NSRange(location: 2, length: bodyLen)
             if nextChecked {
-                storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: bodyRange)
-                storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: bodyRange)
+                updatedLine.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: localBodyRange)
+                updatedLine.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: localBodyRange)
             } else {
-                storage.removeAttribute(.strikethroughStyle, range: bodyRange)
-                storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: bodyRange)
+                updatedLine.removeAttribute(.strikethroughStyle, range: localBodyRange)
+                updatedLine.addAttribute(.foregroundColor, value: NSColor.labelColor, range: localBodyRange)
             }
         }
-        storage.endEditing()
 
+        guard shouldChangeText(in: targetRange, replacementString: updatedLine.string) else { return false }
+        storage.replaceCharacters(in: targetRange, with: updatedLine)
         didChangeText()
-        onFormatChanged?()
         return true
     }
 
@@ -769,7 +873,7 @@ final class PlaceholderNSTextView: NSTextView {
         let result = NSMutableAttributedString(
             string: isChecked ? "☑" : "☐",
             attributes: [
-                .font: NSFont.systemFont(ofSize: baseFontSize + 1),
+                .font: NSFont.systemFont(ofSize: baseFontSize + 0.8),
                 .foregroundColor: isChecked ? NSColor.controlAccentColor : NSColor.secondaryLabelColor,
                 .paragraphStyle: p
             ]
@@ -878,7 +982,7 @@ final class PlaceholderNSTextView: NSTextView {
             guard let pt = font?.pointSize else { return 0 }
             if pt >= baseFontSize + 4.5 { return 1 }
             if pt >= baseFontSize + 2.2 { return 2 }
-            if pt >= baseFontSize + 1.0 { return 3 }
+            if pt >= baseFontSize + 1.2 { return 3 }
             return 0
         }()
 
@@ -908,7 +1012,7 @@ final class PlaceholderNSTextView: NSTextView {
                     fontSize: baseFontSize,
                     lineSpacing: baseLineSpacing
                 )
-                onFormatChanged?()
+                onTypingFormatChanged?()
                 return
             }
 
@@ -961,7 +1065,7 @@ final class PlaceholderNSTextView: NSTextView {
             }
             attrs[.foregroundColor] = NSColor.labelColor
             typingAttributes = attrs
-            onFormatChanged?()
+            onTypingFormatChanged?()
             return
         }
 
@@ -1050,7 +1154,7 @@ final class PlaceholderNSTextView: NSTextView {
             synced[.foregroundColor] = NSColor.labelColor
             typingAttributes = synced
         }
-        onFormatChanged?()
+        onTypingFormatChanged?()
     }
 
     private func applyWYSIWYGSnippet(_ snippet: MarkdownSnippet) {
@@ -1080,7 +1184,7 @@ final class PlaceholderNSTextView: NSTextView {
                 }
             }
             typingAttributes = hAttrs
-            onFormatChanged?()
+            onTypingFormatChanged?()
 
         case .checkbox:
             let prefix = makeCheckboxPrefix(isChecked: false)
@@ -1090,7 +1194,7 @@ final class PlaceholderNSTextView: NSTextView {
                 didChangeText()
                 setSelectedRange(NSRange(location: sel.location + prefix.length, length: sel.length))
                 typingAttributes = clean
-                onFormatChanged?()
+                onTypingFormatChanged?()
             }
 
         case .bullet:
@@ -1101,7 +1205,7 @@ final class PlaceholderNSTextView: NSTextView {
                 didChangeText()
                 setSelectedRange(NSRange(location: sel.location + prefix.length, length: sel.length))
                 typingAttributes = clean
-                onFormatChanged?()
+                onTypingFormatChanged?()
             }
 
         case .quote:
@@ -1116,7 +1220,7 @@ final class PlaceholderNSTextView: NSTextView {
                 didChangeText()
                 setSelectedRange(NSRange(location: sel.location + prefix.length, length: sel.length))
                 typingAttributes = qAttrs
-                onFormatChanged?()
+                onTypingFormatChanged?()
             }
 
         case .inlineCode:
@@ -1129,12 +1233,12 @@ final class PlaceholderNSTextView: NSTextView {
                     storage.setAttributes(codeAttrs, range: sel)
                     didChangeText()
                     typingAttributes = clean
-                    onFormatChanged?()
+                    onTypingFormatChanged?()
                 }
             } else {
                 let current = currentFormatState()
                 typingAttributes = current.isInlineCode ? clean : codeAttrs
-                onFormatChanged?()
+                onTypingFormatChanged?()
             }
 
         case .divider:
@@ -1149,7 +1253,7 @@ final class PlaceholderNSTextView: NSTextView {
                 didChangeText()
                 setSelectedRange(NSRange(location: sel.location + result.length, length: 0))
                 typingAttributes = clean
-                onFormatChanged?()
+                onTypingFormatChanged?()
             }
         }
     }
@@ -1179,7 +1283,7 @@ final class PlaceholderNSTextView: NSTextView {
                         fontSize: baseFontSize,
                         lineSpacing: baseLineSpacing
                     )
-                    onFormatChanged?()
+                    onTypingFormatChanged?()
                     return
                 }
             }
@@ -1215,7 +1319,7 @@ final class PlaceholderNSTextView: NSTextView {
                     didChangeText()
                     setSelectedRange(NSRange(location: lineRange.location + divider.length, length: 0))
                     typingAttributes = cleanAttrs
-                    onFormatChanged?()
+                    onTypingFormatChanged?()
                     return
                 }
             }
@@ -1229,7 +1333,7 @@ final class PlaceholderNSTextView: NSTextView {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 } else {
@@ -1240,7 +1344,7 @@ final class PlaceholderNSTextView: NSTextView {
                         textStorage?.replaceCharacters(in: insertPos, with: nextBox)
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 }
@@ -1255,7 +1359,7 @@ final class PlaceholderNSTextView: NSTextView {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 }
@@ -1271,7 +1375,7 @@ final class PlaceholderNSTextView: NSTextView {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 } else {
@@ -1285,11 +1389,11 @@ final class PlaceholderNSTextView: NSTextView {
                         textStorage?.replaceCharacters(in: insertPos, with: attrPrefix)
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 }
-            } else if let regex = try? NSRegularExpression(pattern: #"^(\d+)\.\s+"#),
+            } else if let regex = Self.numberedListRegex,
                       let match = regex.firstMatch(
                           in: lineBeforeCaret,
                           range: NSRange(location: 0, length: (lineBeforeCaret as NSString).length)
@@ -1304,7 +1408,7 @@ final class PlaceholderNSTextView: NSTextView {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 } else if let num = Int(numStr) {
@@ -1319,7 +1423,7 @@ final class PlaceholderNSTextView: NSTextView {
                         )
                         didChangeText()
                         typingAttributes = cleanAttrs
-                        onFormatChanged?()
+                        onTypingFormatChanged?()
                         return
                     }
                 }
@@ -1329,13 +1433,13 @@ final class PlaceholderNSTextView: NSTextView {
         // Standard newline: reset typingAttributes so heading / yellow highlight / bold / underline don't bleed
         super.insertNewline(sender)
         typingAttributes = cleanAttrs
-        onFormatChanged?()
+        onTypingFormatChanged?()
     }
 
     // MARK: - Keyboard Shortcuts & Clean Paste
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard isRichText, window?.firstResponder === self else {
+        guard isRichText, isTabActive, !isHiddenOrHasHiddenAncestor, window?.firstResponder === self else {
             return super.performKeyEquivalent(with: event)
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

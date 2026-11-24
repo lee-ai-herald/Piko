@@ -53,9 +53,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         } else if seconds < 86_400 {
             return "\(seconds / 3_600) 小时前"
         } else {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "M/d HH:mm"
-            return formatter.string(from: createdAt)
+            return RmbFormatters.monthDayTime.string(from: createdAt)
         }
     }
 }

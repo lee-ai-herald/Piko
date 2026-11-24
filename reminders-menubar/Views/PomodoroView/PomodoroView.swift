@@ -30,13 +30,6 @@ struct PomodoroView: View {
         }
     }
 
-    private var estimatedFinishTimeText: String {
-        let finishDate = Date().addingTimeInterval(TimeInterval(pomodoro.remainingSeconds))
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return "预计 \(formatter.string(from: finishDate)) 结束"
-    }
-
     private var accentColor: Color {
         pomodoro.phase.accentColor
     }
@@ -118,15 +111,12 @@ struct PomodoroView: View {
         }
         .onAppear { syncInputField() }
         .onChange(of: pomodoro.phase) { _ in syncInputField() }
+        .onChange(of: currentPhaseMinutes) { _ in syncInputField() }
     }
 
     // MARK: - Left Hero Timer Stage
 
     private func timerHeroStage(dialSize: CGFloat) -> some View {
-        let showTicks = dialSize >= 175
-        let ringSize = showTicks ? dialSize * 0.84 : dialSize * 0.92
-        let strokeW: CGFloat = dialSize >= 190 ? 10 : 8
-        let timeFontSize = max(26, dialSize * 0.205)
         let isTiny = dialSize < 154
 
         return VStack(spacing: isTiny ? 14 : 20) {
@@ -184,91 +174,15 @@ struct PomodoroView: View {
                 Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
             )
 
-            // Precision Concentric Dial
-            ZStack {
-                // Soft outer ambient halo
-                Circle()
-                    .fill(accentColor.opacity(pomodoro.isRunning ? 0.07 : 0.03))
-                    .frame(width: ringSize + 24, height: ringSize + 24)
-                    .blur(radius: 10)
-
-                if showTicks {
-                    ForEach(0..<60, id: \.self) { tick in
-                        let isMajor = tick.isMultiple(of: 5)
-                        let tickProgress = Double(tick) / 60.0
-                        let isPassed = tickProgress <= pomodoro.progress && pomodoro.progress > 0.005
-                        Rectangle()
-                            .fill(
-                                isPassed
-                                    ? accentColor.opacity(isMajor ? 0.65 : 0.32)
-                                    : Color.primary.opacity(isMajor ? 0.16 : 0.06)
-                            )
-                            .frame(width: isMajor ? 1.6 : 1, height: isMajor ? 7 : 3.5)
-                            .offset(y: -(dialSize * 0.485))
-                            .rotationEffect(.degrees(Double(tick) * 6))
-                    }
-                }
-
-                // Glass inner dial face
-                Circle()
-                    .fill(Color(NSColor.windowBackgroundColor).opacity(0.46))
-                    .frame(width: ringSize, height: ringSize)
-                    .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
-                    .overlay(
-                        Circle().strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.75)
-                    )
-
-                // Track ring
-                Circle()
-                    .stroke(Color.primary.opacity(0.07), lineWidth: strokeW)
-                    .frame(width: ringSize, height: ringSize)
-
-                // Active progress arc
-                Circle()
-                    .trim(from: 0, to: max(0.003, pomodoro.progress))
-                    .stroke(
-                        AngularGradient(
-                            gradient: Gradient(colors: [accentColor, secondaryGradientColor, accentColor]),
-                            center: .center,
-                            startAngle: .degrees(0),
-                            endAngle: .degrees(360)
-                        ),
-                        style: StrokeStyle(lineWidth: strokeW, lineCap: .round)
-                    )
-                    .frame(width: ringSize, height: ringSize)
-                    .rotationEffect(.degrees(-90))
-                    .shadow(color: accentColor.opacity(pomodoro.isRunning ? 0.34 : 0.12), radius: 8)
-                    .animation(.linear(duration: 0.25), value: pomodoro.progress)
-
-                // Center readout
-                VStack(spacing: isTiny ? 4 : 6) {
-                    Text(pomodoro.formattedTime)
-                        .font(.system(size: timeFontSize, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(.primary)
-
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(accentColor)
-                            .frame(width: 6, height: 6)
-                            .opacity(pomodoro.isRunning ? 1.0 : 0.5)
-
-                        Text(pomodoro.isRunning ? "\(pomodoro.phase.title)中" : "准备\(pomodoro.phase.title)")
-                            .font(.system(size: isTiny ? 10.5 : 11.5, weight: .semibold))
-                            .foregroundColor(accentColor)
-                    }
-                    .padding(.horizontal, isTiny ? 8 : 10)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(accentColor.opacity(0.11)))
-
-                    if !isTiny {
-                        Text(estimatedFinishTimeText)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundColor(.secondary.opacity(0.85))
-                    }
-                }
-            }
-            .frame(width: dialSize, height: dialSize)
+            // Isolated 1Hz Concentric Dial (keeps right-side bento cards & layout static during ticks)
+            PomodoroDialView(
+                ticker: pomodoro.ticker,
+                dialSize: dialSize,
+                phase: pomodoro.phase,
+                isRunning: pomodoro.isRunning,
+                accentColor: accentColor,
+                secondaryGradientColor: secondaryGradientColor
+            )
 
             // Tactile Transport Controls
             HStack(spacing: isTiny ? 14 : 18) {
@@ -281,7 +195,9 @@ struct PomodoroView: View {
                 }
 
                 Button {
-                    applyCustomInputIfChanged()
+                    if !pomodoro.isRunning {
+                        applyCustomInputIfChanged()
+                    }
                     pomodoro.toggleStartPause()
                 } label: {
                     HStack(spacing: 7) {
@@ -400,8 +316,7 @@ struct PomodoroView: View {
                         )
                         .contentShape(Rectangle())
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
+                    .modifier(RmbPlainMenuStyle())
 
                     // Quick 1-click chips for top active tasks
                     let quickTasks = Array(pinnedStore.allItems.prefix(3))
@@ -592,6 +507,106 @@ struct PomodoroView: View {
            mins != currentPhaseMinutes {
             pomodoro.setDurationMinutes(mins, for: pomodoro.phase)
         }
+    }
+}
+
+// MARK: - Isolated 1Hz Concentric Dial
+
+@MainActor
+private struct PomodoroDialView: View {
+    @ObservedObject var ticker: PomodoroTicker
+    let dialSize: CGFloat
+    let phase: PomodoroPhase
+    let isRunning: Bool
+    let accentColor: Color
+    let secondaryGradientColor: Color
+
+    var body: some View {
+        let showTicks = dialSize >= 175
+        let ringSize = showTicks ? dialSize * 0.84 : dialSize * 0.92
+        let strokeW: CGFloat = dialSize >= 190 ? 10 : 8
+        let timeFontSize = max(26, dialSize * 0.205)
+        let isTiny = dialSize < 154
+
+        ZStack {
+            Circle()
+                .fill(accentColor.opacity(isRunning ? 0.07 : 0.03))
+                .frame(width: ringSize + 24, height: ringSize + 24)
+                .blur(radius: 10)
+
+            if showTicks {
+                ForEach(0..<60, id: \.self) { tick in
+                    let isMajor = tick.isMultiple(of: 5)
+                    let tickProgress = Double(tick) / 60.0
+                    let isPassed = tickProgress <= ticker.progress && ticker.progress > 0.005
+                    Rectangle()
+                        .fill(
+                            isPassed
+                                ? accentColor.opacity(isMajor ? 0.65 : 0.32)
+                                : Color.primary.opacity(isMajor ? 0.16 : 0.06)
+                        )
+                        .frame(width: isMajor ? 1.6 : 1, height: isMajor ? 7 : 3.5)
+                        .offset(y: -(dialSize * 0.485))
+                        .rotationEffect(.degrees(Double(tick) * 6))
+                }
+            }
+
+            Circle()
+                .fill(Color(NSColor.windowBackgroundColor).opacity(0.46))
+                .frame(width: ringSize, height: ringSize)
+                .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+                .overlay(
+                    Circle().strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.75)
+                )
+
+            Circle()
+                .stroke(Color.primary.opacity(0.07), lineWidth: strokeW)
+                .frame(width: ringSize, height: ringSize)
+
+            Circle()
+                .trim(from: 0, to: max(0.003, ticker.progress))
+                .stroke(
+                    AngularGradient(
+                        gradient: Gradient(colors: [accentColor, secondaryGradientColor, accentColor]),
+                        center: .center,
+                        startAngle: .degrees(0),
+                        endAngle: .degrees(360)
+                    ),
+                    style: StrokeStyle(lineWidth: strokeW, lineCap: .round)
+                )
+                .frame(width: ringSize, height: ringSize)
+                .rotationEffect(.degrees(-90))
+                .shadow(color: accentColor.opacity(isRunning ? 0.34 : 0.12), radius: 8)
+                .animation(.linear(duration: 0.25), value: ticker.progress)
+
+            VStack(spacing: isTiny ? 4 : 6) {
+                Text(ticker.formattedTime)
+                    .font(.system(size: timeFontSize, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(.primary)
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(accentColor)
+                        .frame(width: 6, height: 6)
+                        .opacity(isRunning ? 1.0 : 0.5)
+
+                    Text(isRunning ? "\(phase.title)中" : "准备\(phase.title)")
+                        .font(.system(size: isTiny ? 10.5 : 11.5, weight: .semibold))
+                        .foregroundColor(accentColor)
+                }
+                .padding(.horizontal, isTiny ? 8 : 10)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(accentColor.opacity(0.11)))
+
+                if !isTiny {
+                    Text(ticker.estimatedFinishTimeText)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundColor(.secondary.opacity(0.85))
+                }
+            }
+        }
+        .frame(width: dialSize, height: dialSize)
     }
 }
 

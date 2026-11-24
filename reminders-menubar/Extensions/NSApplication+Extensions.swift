@@ -12,11 +12,8 @@ extension NSApplication {
 
         if #available(macOS 14.0, *) {
             SettingsOpenerBridge.shared.requestOpen()
-        } else if #available(macOS 13.0, *) {
-            sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            activate(ignoringOtherApps: true)
         } else {
-            sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             activate(ignoringOtherApps: true)
         }
     }
