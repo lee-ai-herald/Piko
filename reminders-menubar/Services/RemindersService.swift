@@ -126,23 +126,29 @@ class RemindersService {
         return identifiers.compactMap { itemsById[$0] }
     }
 
-    func fetchIncompleteReminders() async -> [EKReminder] {
+    func fetchIncompleteReminders(for calendars: [EKCalendar]? = nil) async -> [EKReminder] {
+        if let calendars, calendars.isEmpty {
+            return []
+        }
         let predicate = eventStore.predicateForIncompleteReminders(
             withDueDateStarting: nil,
             ending: nil,
-            calendars: nil
+            calendars: calendars
         )
         return await fetchReminders(matching: predicate)
     }
 
-    func fetchRecentCompletedReminders(daysBack: Int? = 30) async -> [EKReminder] {
+    func fetchRecentCompletedReminders(daysBack: Int? = 30, for calendars: [EKCalendar]? = nil) async -> [EKReminder] {
+        if let calendars, calendars.isEmpty {
+            return []
+        }
         let startDate: Date? = daysBack.flatMap { days in
             Calendar.current.date(byAdding: .day, value: -days, to: Calendar.current.startOfDay(for: Date()))
         }
         let predicate = eventStore.predicateForCompletedReminders(
             withCompletionDateStarting: startDate,
             ending: nil,
-            calendars: nil
+            calendars: calendars
         )
         let fetched = await fetchReminders(matching: predicate)
         return fetched.sorted {
@@ -168,8 +174,13 @@ class RemindersService {
     }
 
     @discardableResult
-    func createQuickReminder(title: String, notes: String? = nil, dueDate: Date? = nil) -> EKReminder? {
-        guard let calendar = getDefaultCalendar() else { return nil }
+    func createQuickReminder(
+        title: String,
+        notes: String? = nil,
+        dueDate: Date? = nil,
+        in targetCalendar: EKCalendar? = nil
+    ) -> EKReminder? {
+        guard let calendar = targetCalendar ?? getDefaultCalendar() else { return nil }
         let reminder = EKReminder(eventStore: eventStore)
         reminder.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if let notes {

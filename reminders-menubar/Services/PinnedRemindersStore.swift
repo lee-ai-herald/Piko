@@ -138,6 +138,49 @@ final class PinnedRemindersStore: ObservableObject {
                 }
             }
             .store(in: &cancellationTokens)
+
+        UserPreferences.shared.$excludedReminderCalendarIdentifiers
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task {
+                    await self?.refresh()
+                }
+            }
+            .store(in: &cancellationTokens)
+    }
+
+    // MARK: - Synced Lists
+
+    var syncedCalendars: [EKCalendar] {
+        let excluded = UserPreferences.shared.excludedReminderCalendarIdentifiers
+        return availableCalendars.filter { !excluded.contains($0.calendarIdentifier) }
+    }
+
+    var hasExcludedCalendars: Bool {
+        syncedCalendars.count < availableCalendars.count
+    }
+
+    var allCalendarsExcluded: Bool {
+        !availableCalendars.isEmpty && syncedCalendars.isEmpty
+    }
+
+    /// Resolves the target Apple Reminders list for newly created tasks, ensuring it is currently synced.
+    var defaultSavingCalendar: EKCalendar? {
+        let calendars = availableCalendars.isEmpty ? RemindersService.shared.getCalendars() : availableCalendars
+        let excluded = UserPreferences.shared.excludedReminderCalendarIdentifiers
+        let synced = calendars.filter { !excluded.contains($0.calendarIdentifier) }
+        guard !synced.isEmpty else { return nil }
+
+        if let preferredId = UserPreferences.shared.preferredCalendarIdentifierForSaving,
+           let preferred = synced.first(where: { $0.calendarIdentifier == preferredId }) {
+            return preferred
+        }
+        if let systemDefault = RemindersService.shared.getDefaultCalendar(),
+           synced.contains(where: { $0.calendarIdentifier == systemDefault.calendarIdentifier }) {
+            return systemDefault
+        }
+        return synced.first
     }
 
     // MARK: - Date navigation
@@ -364,7 +407,14 @@ final class PinnedRemindersStore: ObservableObject {
     func quickCreate(title: String, notes: String? = nil) -> Bool {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        guard let reminder = RemindersService.shared.createQuickReminder(title: trimmed, notes: notes) else { return false }
+        guard let targetCalendar = defaultSavingCalendar else { return false }
+        guard let reminder = RemindersService.shared.createQuickReminder(
+            title: trimmed,
+            notes: notes,
+            in: targetCalendar
+        ) else {
+            return false
+        }
         allItems.insert(ReminderItem(for: reminder), at: 0)
         NotificationCenter.default.post(name: .remindersDataShouldUpdate, object: nil)
         return true
@@ -701,9 +751,17 @@ final class PinnedRemindersStore: ObservableObject {
         let calendars = RemindersService.shared.getCalendars()
         self.availableCalendars = calendars
 
+        let excluded = UserPreferences.shared.excludedReminderCalendarIdentifiers
+        let synced = calendars.filter { !excluded.contains($0.calendarIdentifier) }
+        let isFilteringCalendars = synced.count < calendars.count
+        let fetchCalendars: [EKCalendar]? = isFilteringCalendars ? synced : nil
+
         let fetchDays: Int? = (completedTimeRange == .all) ? nil : 30
-        async let incompleteFetch = RemindersService.shared.fetchIncompleteReminders()
-        async let completedFetch = RemindersService.shared.fetchRecentCompletedReminders(daysBack: fetchDays)
+        async let incompleteFetch = RemindersService.shared.fetchIncompleteReminders(for: fetchCalendars)
+        async let completedFetch = RemindersService.shared.fetchRecentCompletedReminders(
+            daysBack: fetchDays,
+            for: fetchCalendars
+        )
 
         let incomplete = await incompleteFetch
         let recentCompleted = await completedFetch
@@ -714,11 +772,14 @@ final class PinnedRemindersStore: ObservableObject {
         self.allItems = activeItems
         self.completedItems = doneItems
 
-        let validIds = Set(activeItems.map(\.id)).union(Set(doneItems.map(\.id)))
-        let prunedSchedules = schedules.filter { validIds.contains($0.key) }
-        if prunedSchedules.count != schedules.count {
-            schedules = prunedSchedules
-            persistSchedules()
+        // Preserve local schedules for temporarily excluded lists so re-enabling restores them intact.
+        if !isFilteringCalendars {
+            let validIds = Set(activeItems.map(\.id)).union(Set(doneItems.map(\.id)))
+            let prunedSchedules = schedules.filter { validIds.contains($0.key) }
+            if prunedSchedules.count != schedules.count {
+                schedules = prunedSchedules
+                persistSchedules()
+            }
         }
 
         await updateMenuBarCount()
@@ -730,7 +791,8 @@ final class PinnedRemindersStore: ObservableObject {
         case .due:
             count = allItems.filter { $0.reminder.isExpired }.count
         case .today:
-            count = await RemindersService.shared.getUpcomingReminders(.today).count
+            let filterIds: [String]? = hasExcludedCalendars ? syncedCalendars.map(\.calendarIdentifier) : nil
+            count = await RemindersService.shared.getUpcomingReminders(.today, for: filterIds).count
         case .allReminders:
             count = allItems.count
         case .disabled:

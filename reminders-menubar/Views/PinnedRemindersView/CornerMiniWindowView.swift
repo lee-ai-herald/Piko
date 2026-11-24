@@ -36,7 +36,7 @@ struct CornerMiniWindowView: View {
                         }
                         if mountedMiniTabs.contains(.notes) {
                             miniTabLayer(isActive: pinnedStore.activeTab == .notes, size: contentGeo.size) {
-                                MiniQuickNotesView()
+                                MiniQuickNotesView(isActiveTab: pinnedStore.activeTab == .notes)
                             }
                         }
                     }
@@ -116,6 +116,7 @@ struct CornerMiniWindowView: View {
             .clipped()
             .opacity(isActive ? 1 : 0)
             .offset(y: isActive ? 0 : 5)
+            .disabled(!isActive)
             .allowsHitTesting(isActive)
             .accessibilityHidden(!isActive)
             .zIndex(isActive ? 1 : 0)
@@ -280,6 +281,7 @@ private struct MiniTaskChecklistView: View {
     let onTapEdit: (ReminderItem) -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
+    @ObservedObject private var userPreferences = UserPreferences.shared
     @State private var quickAddText = ""
     @State private var isScheduledExpanded = true
     @State private var isSearchVisible = false
@@ -310,6 +312,25 @@ private struct MiniTaskChecklistView: View {
                     }
 
                     Spacer(minLength: 4)
+
+                    if pinnedStore.hasExcludedCalendars {
+                        Button {
+                            NSApp.openAppSettings(tab: .maintenance)
+                        } label: {
+                            HStack(spacing: 2.5) {
+                                Image(systemName: "line.3.horizontal.decrease.circle")
+                                    .font(.system(size: 9.5, weight: .medium))
+                                Text("\(pinnedStore.syncedCalendars.count)/\(pinnedStore.availableCalendars.count)")
+                                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            }
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.11)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("仅同步部分提醒事项列表（点击管理同步列表）")
+                    }
 
                     if pinnedStore.priorityFilter != nil {
                         Button("全部") {
@@ -376,16 +397,21 @@ private struct MiniTaskChecklistView: View {
             HStack(spacing: 6) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 12))
-                    .foregroundColor(.accentColor.opacity(0.85))
+                    .foregroundColor(pinnedStore.allCalendarsExcluded ? .secondary.opacity(0.45) : .accentColor.opacity(0.85))
 
-                TextField("添加新任务，回车确认…", text: $quickAddText)
+                TextField(
+                    pinnedStore.allCalendarsExcluded ? "已暂停同步，请先开启列表…" : "添加新任务，回车确认…",
+                    text: $quickAddText
+                )
                     .textFieldStyle(.plain)
                     .font(.system(size: 11.5))
+                    .disabled(pinnedStore.allCalendarsExcluded)
                     .onSubmit {
                         let title = quickAddText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !title.isEmpty else { return }
-                        pinnedStore.quickCreate(title: title)
-                        quickAddText = ""
+                        if pinnedStore.quickCreate(title: title) {
+                            quickAddText = ""
+                        }
                     }
             }
             .padding(.horizontal, 10)
@@ -396,7 +422,41 @@ private struct MiniTaskChecklistView: View {
 
             // Task Checklist ScrollView (+ Floating Undo Toast)
             ZStack(alignment: .bottom) {
-                if pinnedStore.filteredItems.isEmpty && pinnedStore.filteredCompletedItems.isEmpty {
+                if pinnedStore.allCalendarsExcluded {
+                    VStack(spacing: 8) {
+                        Spacer()
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                            .font(.system(size: 24))
+                            .foregroundColor(.secondary.opacity(0.6))
+                        Text("已暂停全部列表同步")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundColor(.primary)
+                        HStack(spacing: 8) {
+                            Button("恢复全部同步") {
+                                userPreferences.enableAllCalendars()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 4.5)
+                            .background(Capsule().fill(Color.accentColor))
+
+                            Button("同步设置") {
+                                NSApp.openAppSettings(tab: .maintenance)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4.5)
+                            .background(Capsule().fill(Color.primary.opacity(0.07)))
+                        }
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                } else if pinnedStore.filteredItems.isEmpty && pinnedStore.filteredCompletedItems.isEmpty {
                     VStack(spacing: 8) {
                         Spacer()
                         Image(systemName: "checkmark.circle")

@@ -3,6 +3,7 @@ import SwiftUI
 private enum PreferencesKeys {
     static let reminderMenuBarIcon = "reminderMenuBarIcon"
     static let calendarIdentifiersFilter = "calendarIdentifiersFilter"
+    static let excludedReminderCalendarIdentifiers = "excludedReminderCalendarIdentifiers"
     static let calendarIdentifierForSaving = "calendarIdentifierForSaving"
     static let rmbColorScheme = "rmbColorScheme"
     static let preferTransparentBackground = "backgroundIsTransparent"
@@ -78,9 +79,41 @@ class UserPreferences: ObservableObject {
         set { Self.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifiersFilter) }
     }
 
-    var preferredCalendarIdentifierForSaving: String? {
-        get { Self.defaults.string(forKey: PreferencesKeys.calendarIdentifierForSaving) }
-        set { Self.defaults.set(newValue, forKey: PreferencesKeys.calendarIdentifierForSaving) }
+    /// Apple Reminders list identifiers explicitly excluded from Piko sync.
+    /// Empty by default so all lists (including newly created ones) sync automatically.
+    @Published var excludedReminderCalendarIdentifiers: Set<String> = {
+        Set(defaults.stringArray(forKey: PreferencesKeys.excludedReminderCalendarIdentifiers) ?? [])
+    }() {
+        didSet {
+            Self.defaults.set(
+                Array(excludedReminderCalendarIdentifiers).sorted(),
+                forKey: PreferencesKeys.excludedReminderCalendarIdentifiers
+            )
+        }
+    }
+
+    @Published var preferredCalendarIdentifierForSaving: String? = {
+        defaults.string(forKey: PreferencesKeys.calendarIdentifierForSaving)
+    }() {
+        didSet {
+            Self.defaults.set(preferredCalendarIdentifierForSaving, forKey: PreferencesKeys.calendarIdentifierForSaving)
+        }
+    }
+
+    func isCalendarSynced(_ calendarIdentifier: String) -> Bool {
+        !excludedReminderCalendarIdentifiers.contains(calendarIdentifier)
+    }
+
+    func setCalendarSynced(_ isSynced: Bool, for calendarIdentifier: String) {
+        if isSynced {
+            excludedReminderCalendarIdentifiers.remove(calendarIdentifier)
+        } else {
+            excludedReminderCalendarIdentifiers.insert(calendarIdentifier)
+        }
+    }
+
+    func enableAllCalendars() {
+        excludedReminderCalendarIdentifiers.removeAll()
     }
 
     @Published var upcomingRemindersInterval: ReminderInterval = {

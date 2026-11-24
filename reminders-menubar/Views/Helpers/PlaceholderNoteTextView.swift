@@ -58,6 +58,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
     var lineSpacing: CGFloat = 3
     var isRichTextEnabled: Bool = false
     var isLiveMarkdownEnabled: Bool = false
+    var isActive: Bool = true
     var initialRTFData: Data? = nil
     var formattingController: NoteFormattingController? = nil
     var onRichTextChanged: ((String, Data?) -> Void)? = nil
@@ -124,12 +125,22 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         formattingController?.activeFormat = textView.currentFormatState()
 
         scrollView.documentView = textView
+        scrollView.isHidden = !isActive
+        textView.isTabActive = isActive
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? PlaceholderNSTextView else { return }
+
+        let shouldBeHidden = !isActive
+        if scrollView.isHidden != shouldBeHidden || textView.isTabActive != isActive {
+            scrollView.isHidden = shouldBeHidden
+            textView.isTabActive = isActive
+            scrollView.window?.invalidateCursorRects(for: scrollView)
+            textView.window?.invalidateCursorRects(for: textView)
+        }
 
         textView.baseFontSize = fontSize
         textView.baseLineSpacing = lineSpacing
@@ -442,8 +453,19 @@ final class PlaceholderNSTextView: NSTextView {
     var baseFontSize: CGFloat = 13
     var baseLineSpacing: CGFloat = 3
     var isLiveMarkdownEnabled: Bool = false
+    var isTabActive: Bool = true
     var onSendSelectionToBoard: ((String, Bool) -> Void)?
     var onFormatChanged: (() -> Void)?
+
+    override func resetCursorRects() {
+        guard isTabActive, !isHiddenOrHasHiddenAncestor else { return }
+        super.resetCursorRects()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        guard isTabActive, !isHiddenOrHasHiddenAncestor else { return }
+        super.cursorUpdate(with: event)
+    }
 
     private var isApplyingAutoMarkdown = false
 

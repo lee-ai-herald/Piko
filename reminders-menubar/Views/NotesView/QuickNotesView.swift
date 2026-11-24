@@ -4,6 +4,8 @@ import SwiftUI
 
 @MainActor
 struct QuickNotesView: View {
+    var isActiveTab: Bool = true
+
     @ObservedObject private var store = QuickNotesStore.shared
     @State private var searchText = ""
     @State private var showPinnedOnly = false
@@ -34,7 +36,7 @@ struct QuickNotesView: View {
                     Divider().opacity(0.42)
 
                     if let note = activeNote {
-                        NoteEditorPane(note: note, isMiniMode: false, onBackToList: nil)
+                        NoteEditorPane(note: note, isMiniMode: false, isActiveTab: isActiveTab, onBackToList: nil)
                             .id(note.id)
                     } else {
                         emptyEditorPlaceholder
@@ -42,7 +44,7 @@ struct QuickNotesView: View {
                 }
             } else {
                 if compactShowingEditor, let note = activeNote {
-                    NoteEditorPane(note: note, isMiniMode: false) {
+                    NoteEditorPane(note: note, isMiniMode: false, isActiveTab: isActiveTab) {
                         compactShowingEditor = false
                     }
                     .id(note.id)
@@ -378,6 +380,7 @@ private struct QuickNoteCardRow: View {
 private struct NoteEditorPane: View {
     let note: QuickNoteItem
     let isMiniMode: Bool
+    let isActiveTab: Bool
     let onBackToList: (() -> Void)?
     var onCreateNote: (() -> Void)? = nil
 
@@ -401,11 +404,13 @@ private struct NoteEditorPane: View {
     init(
         note: QuickNoteItem,
         isMiniMode: Bool,
+        isActiveTab: Bool = true,
         onBackToList: (() -> Void)?,
         onCreateNote: (() -> Void)? = nil
     ) {
         self.note = note
         self.isMiniMode = isMiniMode
+        self.isActiveTab = isActiveTab
         self.onBackToList = onBackToList
         self.onCreateNote = onCreateNote
         _titleText = State(initialValue: note.title)
@@ -450,6 +455,7 @@ private struct NoteEditorPane: View {
                 lineSpacing: 3.5,
                 isRichTextEnabled: true,
                 isLiveMarkdownEnabled: userPreferences.isNoteMarkdownEnabled,
+                isActive: isActiveTab,
                 initialRTFData: liveNote.rtfData,
                 formattingController: formattingController,
                 onRichTextChanged: { plain, rtf in
@@ -889,6 +895,10 @@ private struct NoteEditorPane: View {
             showToast("请先授予提醒事项权限")
             return
         }
+        guard !PinnedRemindersStore.shared.allCalendarsExcluded else {
+            showToast("请先在设置中开启至少一个同步列表")
+            return
+        }
         let count = PinnedRemindersStore.shared.quickCreateFromSelection(text, splitByLine: splitByLine)
         guard count > 0 else { return }
         showToast(count == 1 ? "已添加到规划板" : "已添加 \(count) 条任务")
@@ -988,6 +998,8 @@ private struct NoteHighlightToggleButton: View {
 
 @MainActor
 struct MiniQuickNotesView: View {
+    var isActiveTab: Bool = true
+
     @ObservedObject private var store = QuickNotesStore.shared
     @State private var isShowingList = false
     @State private var searchText = ""
@@ -1010,6 +1022,7 @@ struct MiniQuickNotesView: View {
                 NoteEditorPane(
                     note: note,
                     isMiniMode: true,
+                    isActiveTab: isActiveTab,
                     onBackToList: {
                         isShowingList = true
                     },

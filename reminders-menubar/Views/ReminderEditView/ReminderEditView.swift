@@ -92,6 +92,16 @@ struct ReminderEditView: View {
         }
     }
 
+    private var editableCalendars: [EKCalendar] {
+        var result = pinnedStore.syncedCalendars
+        if case .edit(let reminder, _) = mode,
+           let current = reminder.calendar,
+           !result.contains(where: { $0.calendarIdentifier == current.calendarIdentifier }) {
+            result.insert(current, at: 0)
+        }
+        return result.isEmpty ? pinnedStore.availableCalendars : result
+    }
+
     init(isPresented: Binding<Bool>) {
         self.mode = .create
         _isPresented = isPresented
@@ -100,7 +110,7 @@ struct ReminderEditView: View {
         _title = State(initialValue: "")
         _notes = State(initialValue: "")
         _priority = State(initialValue: .none)
-        _selectedCalendar = State(initialValue: RemindersService.shared.getDefaultCalendar())
+        _selectedCalendar = State(initialValue: PinnedRemindersStore.shared.defaultSavingCalendar ?? RemindersService.shared.getDefaultCalendar())
         _recurrence = State(initialValue: .none)
         _hasDate = State(initialValue: false)
         _startDate = State(initialValue: today)
@@ -183,8 +193,8 @@ struct ReminderEditView: View {
                     // Card 3: Crystal-Clear Visual Date Range & Schedule
                     dateRangeScheduleCard
 
-                    // Card 4: Calendar List Pills (only if user has > 1 list, or clean compact row)
-                    if !reminderHasChildren && pinnedStore.availableCalendars.count > 1 {
+                    // Card 4: Calendar List Pills (only if user has > 1 synced list)
+                    if !reminderHasChildren && editableCalendars.count > 1 {
                         calendarPillsSection
                     }
                 }
@@ -268,7 +278,9 @@ struct ReminderEditView: View {
         .frame(maxHeight: PinnedPanelController.shared.isCornerMiniMode ? 480 : 620)
         .onAppear {
             if isCreateMode, selectedCalendar == nil {
-                selectedCalendar = RemindersService.shared.getDefaultCalendar() ?? pinnedStore.availableCalendars.first
+                selectedCalendar = pinnedStore.defaultSavingCalendar
+                    ?? RemindersService.shared.getDefaultCalendar()
+                    ?? editableCalendars.first
             }
         }
     }
@@ -506,7 +518,7 @@ struct ReminderEditView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    ForEach(pinnedStore.availableCalendars, id: \.calendarIdentifier) { cal in
+                    ForEach(editableCalendars, id: \.calendarIdentifier) { cal in
                         let isSelected = selectedCalendar?.calendarIdentifier == cal.calendarIdentifier
                         let calColor = Color(cal.color)
                         Button {
@@ -605,7 +617,7 @@ struct ReminderEditView: View {
         draft.title = trimmed
         draft.notes = notes
         draft.priority = priority
-        draft.calendar = selectedCalendar ?? RemindersService.shared.getDefaultCalendar()
+        draft.calendar = selectedCalendar ?? pinnedStore.defaultSavingCalendar ?? RemindersService.shared.getDefaultCalendar()
         draft.hasDateChanges = true
         draft.hasRecurrenceChanges = true
         draft.recurrence = hasDate ? recurrence : .none

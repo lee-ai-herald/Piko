@@ -148,7 +148,7 @@ struct PinnedPanelView: View {
                                 }
                                 if mountedTabs.contains(.notes) {
                                     tabLayer(isActive: pinnedStore.activeTab == .notes) {
-                                        QuickNotesView()
+                                        QuickNotesView(isActiveTab: pinnedStore.activeTab == .notes)
                                     }
                                 }
                             }
@@ -230,6 +230,7 @@ struct PinnedPanelView: View {
             .opacity(isActive ? 1 : 0)
             .scaleEffect(isActive ? 1.0 : 0.985, anchor: .center)
             .offset(y: isActive ? 0 : 6)
+            .disabled(!isActive)
             .allowsHitTesting(isActive)
             .accessibilityHidden(!isActive)
             .zIndex(isActive ? 1 : 0)
@@ -574,6 +575,7 @@ private struct TaskPoolColumn: View {
     let onDragEnded: (ReminderItem, CGPoint) -> Void
 
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
+    @ObservedObject private var userPreferences = UserPreferences.shared
     @State private var quickAddText = ""
     @State private var isScheduledExpanded = true
 
@@ -597,6 +599,25 @@ private struct TaskPoolColumn: View {
                         .background(Capsule().fill(Color.primary.opacity(0.07)))
 
                     Spacer()
+
+                    if pinnedStore.hasExcludedCalendars {
+                        Button {
+                            NSApp.openAppSettings(tab: .maintenance)
+                        } label: {
+                            HStack(spacing: 2.5) {
+                                Image(systemName: "line.3.horizontal.decrease.circle")
+                                    .font(.system(size: 9.5, weight: .medium))
+                                Text("\(pinnedStore.syncedCalendars.count)/\(pinnedStore.availableCalendars.count)")
+                                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            }
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.11)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("仅同步部分提醒事项列表（点击管理同步列表）")
+                    }
 
                     if pinnedStore.priorityFilter != nil {
                         Button("全部") {
@@ -668,16 +689,21 @@ private struct TaskPoolColumn: View {
             HStack(spacing: 5) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 12))
-                    .foregroundColor(.accentColor.opacity(0.85))
+                    .foregroundColor(pinnedStore.allCalendarsExcluded ? .secondary.opacity(0.45) : .accentColor.opacity(0.85))
 
-                TextField("添加新任务，回车确认…", text: $quickAddText)
+                TextField(
+                    pinnedStore.allCalendarsExcluded ? "已暂停同步，请先开启列表…" : "添加新任务，回车确认…",
+                    text: $quickAddText
+                )
                     .textFieldStyle(.plain)
                     .font(.system(size: 11.5))
+                    .disabled(pinnedStore.allCalendarsExcluded)
                     .onSubmit {
                         let title = quickAddText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !title.isEmpty else { return }
-                        pinnedStore.quickCreate(title: title)
-                        quickAddText = ""
+                        if pinnedStore.quickCreate(title: title) {
+                            quickAddText = ""
+                        }
                     }
             }
             .padding(.horizontal, 10)
@@ -689,69 +715,67 @@ private struct TaskPoolColumn: View {
             // Vertical Task List: 待安排 + 已排期
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
-                    // Section 1: 待安排
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 4) {
-                            Text("待安排")
-                                .font(.system(size: 10.5, weight: .semibold))
+                    if pinnedStore.allCalendarsExcluded {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("已暂停全部提醒事项列表同步")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(.primary)
+                            Text("你可以在设置中选择要同步的列表，或一键恢复全部同步。")
+                                .font(.system(size: 10.5))
                                 .foregroundColor(.secondary)
-                            Text("\(pinnedStore.unscheduledTaskItems.count)")
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.8))
-                            Spacer()
-                        }
-                        .padding(.horizontal, 2)
+                            HStack(spacing: 6) {
+                                Button("恢复全部同步") {
+                                    userPreferences.enableAllCalendars()
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color.accentColor))
 
-                        if pinnedStore.unscheduledTaskItems.isEmpty {
-                            Text(pinnedStore.scheduledTaskItems.isEmpty ? "暂无待办任务，上方回车快速添加" : "全部任务已排期")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary.opacity(0.65))
-                                .padding(.vertical, 6)
-                                .padding(.horizontal, 4)
-                        } else {
-                            ForEach(pinnedStore.unscheduledTaskItems) { item in
-                                TaskPoolRow(
-                                    reminderItem: item,
-                                    isScheduled: false,
-                                    onTap: { onTapEdit(item) },
-                                    onDragChanged: { onDragChanged(item, $0) },
-                                    onDragEnded: { onDragEnded(item, $0) }
-                                )
+                                Button("同步设置") {
+                                    NSApp.openAppSettings(tab: .maintenance)
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color.primary.opacity(0.07)))
                             }
                         }
-                    }
-
-                    // Section 2: 已排期 (so tasks never "disappear" and stay always accessible!)
-                    if !pinnedStore.scheduledTaskItems.isEmpty {
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.primary.opacity(0.035))
+                        )
+                    } else {
+                        // Section 1: 待安排
                         VStack(alignment: .leading, spacing: 5) {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.14)) {
-                                    isScheduledExpanded.toggle()
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: isScheduledExpanded ? "chevron.down" : "chevron.right")
-                                        .font(.system(size: 8.5, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                    Text("已排期")
-                                        .font(.system(size: 10.5, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                    Text("\(pinnedStore.scheduledTaskItems.count)")
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundColor(.secondary.opacity(0.8))
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 2)
-                                .padding(.vertical, 2)
-                                .contentShape(Rectangle())
+                            HStack(spacing: 4) {
+                                Text("待安排")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                Text("\(pinnedStore.unscheduledTaskItems.count)")
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundColor(.secondary.opacity(0.8))
+                                Spacer()
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, 2)
 
-                            if isScheduledExpanded {
-                                ForEach(pinnedStore.scheduledTaskItems) { item in
+                            if pinnedStore.unscheduledTaskItems.isEmpty {
+                                Text(pinnedStore.scheduledTaskItems.isEmpty ? "暂无待办任务，上方回车快速添加" : "全部任务已排期")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary.opacity(0.65))
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 4)
+                            } else {
+                                ForEach(pinnedStore.unscheduledTaskItems) { item in
                                     TaskPoolRow(
                                         reminderItem: item,
-                                        isScheduled: true,
+                                        isScheduled: false,
                                         onTap: { onTapEdit(item) },
                                         onDragChanged: { onDragChanged(item, $0) },
                                         onDragEnded: { onDragEnded(item, $0) }
@@ -759,11 +783,51 @@ private struct TaskPoolColumn: View {
                                 }
                             }
                         }
-                    }
 
-                    // Section 3: 已完成 (Time-filtered, unified calm card, zero-jitter rows)
-                    if !pinnedStore.filteredCompletedItems.isEmpty {
-                        CompletedTasksSection(onTapEdit: onTapEdit)
+                        // Section 2: 已排期 (so tasks never "disappear" and stay always accessible!)
+                        if !pinnedStore.scheduledTaskItems.isEmpty {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.14)) {
+                                        isScheduledExpanded.toggle()
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: isScheduledExpanded ? "chevron.down" : "chevron.right")
+                                            .font(.system(size: 8.5, weight: .semibold))
+                                            .foregroundColor(.secondary)
+                                        Text("已排期")
+                                            .font(.system(size: 10.5, weight: .semibold))
+                                            .foregroundColor(.secondary)
+                                        Text("\(pinnedStore.scheduledTaskItems.count)")
+                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .foregroundColor(.secondary.opacity(0.8))
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 2)
+                                    .padding(.vertical, 2)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                if isScheduledExpanded {
+                                    ForEach(pinnedStore.scheduledTaskItems) { item in
+                                        TaskPoolRow(
+                                            reminderItem: item,
+                                            isScheduled: true,
+                                            onTap: { onTapEdit(item) },
+                                            onDragChanged: { onDragChanged(item, $0) },
+                                            onDragEnded: { onDragEnded(item, $0) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Section 3: 已完成 (Time-filtered, unified calm card, zero-jitter rows)
+                        if !pinnedStore.filteredCompletedItems.isEmpty {
+                            CompletedTasksSection(onTapEdit: onTapEdit)
+                        }
                     }
                 }
                 .padding(.horizontal, 8)
@@ -1723,60 +1787,71 @@ private struct DaySpanBlockView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            // Top & Bottom Resize Edges (disabled on completed blocks; top padded horizontally so it NEVER covers circle/buttons!)
+            // Top & Bottom AppKit-backed Resize Edges (generous hit zone, native resizeUpDown cursor, zero gesture conflict)
             if !isDone {
-                VStack {
-                    SafeResizeEdgeBar(color: quadrantColor, isActive: isResizingTop, isHovered: isHovered)
-                        .padding(.horizontal, 26)
-                        .gesture(
-                            DragGesture(minimumDistance: 3, coordinateSpace: .named("dayCanvas"))
-                                .onChanged { value in
-                                    isResizingTop = true
-                                    topResizeDeltaY = value.translation.height
+                VStack(spacing: 0) {
+                    CardVerticalResizeEdge(
+                        color: quadrantColor,
+                        isActive: isResizingTop,
+                        isCardHovered: isHovered,
+                        hitHeight: 11,
+                        pillAlignment: .center,
+                        helpText: "拖动上边缘调整开始日期",
+                        onDragChanged: { dy in
+                            isResizingTop = true
+                            topResizeDeltaY = dy
+                        },
+                        onDragEnded: { dy in
+                            topResizeDeltaY = dy
+                            let delta = topDayDelta
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                if let baseStart = schedule.startDate,
+                                   let newStart = Calendar.current.date(byAdding: .day, value: delta, to: baseStart) {
+                                    pinnedStore.setDaySpan(
+                                        for: reminderItem.id,
+                                        startDate: newStart,
+                                        spanDays: max(1, schedule.spanDays - delta)
+                                    )
                                 }
-                                .onEnded { _ in
-                                    let delta = topDayDelta
-                                    withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                        if let baseStart = schedule.startDate,
-                                           let newStart = Calendar.current.date(byAdding: .day, value: delta, to: baseStart) {
-                                            pinnedStore.setDaySpan(
-                                                for: reminderItem.id,
-                                                startDate: newStart,
-                                                spanDays: max(1, schedule.spanDays - delta)
-                                            )
-                                        }
-                                        isResizingTop = false
-                                        topResizeDeltaY = 0
-                                    }
-                                }
-                        )
-                        .help("拖动上边缘调整开始日期")
+                                isResizingTop = false
+                                topResizeDeltaY = 0
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 12)
+                    .offset(y: -3)
 
-                    Spacer()
+                    Spacer(minLength: 0)
 
-                    SafeResizeEdgeBar(color: quadrantColor, isActive: isResizingBottom, isHovered: isHovered)
-                        .gesture(
-                            DragGesture(minimumDistance: 3, coordinateSpace: .named("dayCanvas"))
-                                .onChanged { value in
-                                    isResizingBottom = true
-                                    bottomResizeDeltaY = value.translation.height
+                    CardVerticalResizeEdge(
+                        color: quadrantColor,
+                        isActive: isResizingBottom,
+                        isCardHovered: isHovered,
+                        hitHeight: 14,
+                        pillAlignment: .center,
+                        helpText: "拖动下边缘拉长或缩短占用天数",
+                        onDragChanged: { dy in
+                            isResizingBottom = true
+                            bottomResizeDeltaY = dy
+                        },
+                        onDragEnded: { dy in
+                            bottomResizeDeltaY = dy
+                            let delta = bottomDayDelta
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                if let baseStart = schedule.startDate {
+                                    pinnedStore.setDaySpan(
+                                        for: reminderItem.id,
+                                        startDate: baseStart,
+                                        spanDays: max(1, schedule.spanDays + delta)
+                                    )
                                 }
-                                .onEnded { _ in
-                                    let delta = bottomDayDelta
-                                    withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                        if let baseStart = schedule.startDate {
-                                            pinnedStore.setDaySpan(
-                                                for: reminderItem.id,
-                                                startDate: baseStart,
-                                                spanDays: max(1, schedule.spanDays + delta)
-                                            )
-                                        }
-                                        isResizingBottom = false
-                                        bottomResizeDeltaY = 0
-                                    }
-                                }
-                        )
-                        .help("拖动下边缘拉长或缩短占用天数")
+                                isResizingBottom = false
+                                bottomResizeDeltaY = 0
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 6)
+                    .offset(y: 3)
                 }
             }
         }
@@ -2405,56 +2480,67 @@ private struct HourlySlotBlockView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if !isDone {
-                VStack {
-                    SafeResizeEdgeBar(color: quadrantColor, isActive: isResizingTop, isHovered: isHovered)
-                        .padding(.horizontal, 26)
-                        .gesture(
-                            DragGesture(minimumDistance: 3, coordinateSpace: .named("timeCanvas"))
-                                .onChanged { value in
-                                    isResizingTop = true
-                                    topResizeDeltaY = value.translation.height
-                                }
-                                .onEnded { _ in
-                                    let finalStart = snappedStartMinute
-                                    let finalDur = snappedDurationMinutes
-                                    withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                        pinnedStore.setTimeSlot(
-                                            for: reminderItem.id,
-                                            on: pinnedStore.selectedDate,
-                                            startMinute: finalStart,
-                                            durationMinutes: finalDur
-                                        )
-                                        isResizingTop = false
-                                        topResizeDeltaY = 0
-                                    }
-                                }
-                        )
-                        .help("拖动上边缘调整开始时间")
+                VStack(spacing: 0) {
+                    CardVerticalResizeEdge(
+                        color: quadrantColor,
+                        isActive: isResizingTop,
+                        isCardHovered: isHovered,
+                        hitHeight: compact ? 8 : 11,
+                        pillAlignment: .center,
+                        helpText: "拖动上边缘调整开始时间",
+                        onDragChanged: { dy in
+                            isResizingTop = true
+                            topResizeDeltaY = dy
+                        },
+                        onDragEnded: { dy in
+                            topResizeDeltaY = dy
+                            let finalStart = snappedStartMinute
+                            let finalDur = snappedDurationMinutes
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                pinnedStore.setTimeSlot(
+                                    for: reminderItem.id,
+                                    on: pinnedStore.selectedDate,
+                                    startMinute: finalStart,
+                                    durationMinutes: finalDur
+                                )
+                                isResizingTop = false
+                                topResizeDeltaY = 0
+                            }
+                        }
+                    )
+                    .padding(.horizontal, compact ? 24 : 12)
+                    .offset(y: -1)
 
-                    Spacer()
+                    Spacer(minLength: 0)
 
-                    SafeResizeEdgeBar(color: quadrantColor, isActive: isResizingBottom, isHovered: isHovered)
-                        .gesture(
-                            DragGesture(minimumDistance: 3, coordinateSpace: .named("timeCanvas"))
-                                .onChanged { value in
-                                    isResizingBottom = true
-                                    bottomResizeDeltaY = value.translation.height
-                                }
-                                .onEnded { _ in
-                                    let finalDur = snappedDurationMinutes
-                                    withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                        pinnedStore.setTimeSlot(
-                                            for: reminderItem.id,
-                                            on: pinnedStore.selectedDate,
-                                            startMinute: slot.startMinute,
-                                            durationMinutes: finalDur
-                                        )
-                                        isResizingBottom = false
-                                        bottomResizeDeltaY = 0
-                                    }
-                                }
-                        )
-                        .help("拖动下边缘拉长或缩短占用时长")
+                    CardVerticalResizeEdge(
+                        color: quadrantColor,
+                        isActive: isResizingBottom,
+                        isCardHovered: isHovered,
+                        hitHeight: compact ? 9 : 13,
+                        pillAlignment: .center,
+                        helpText: "拖动下边缘拉长或缩短占用时长",
+                        onDragChanged: { dy in
+                            isResizingBottom = true
+                            bottomResizeDeltaY = dy
+                        },
+                        onDragEnded: { dy in
+                            bottomResizeDeltaY = dy
+                            let finalDur = snappedDurationMinutes
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                pinnedStore.setTimeSlot(
+                                    for: reminderItem.id,
+                                    on: pinnedStore.selectedDate,
+                                    startMinute: slot.startMinute,
+                                    durationMinutes: finalDur
+                                )
+                                isResizingBottom = false
+                                bottomResizeDeltaY = 0
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 6)
+                    .offset(y: 1)
                 }
             }
         }
@@ -2516,36 +2602,196 @@ private struct HourlySlotBlockView: View {
     }
 }
 
-/// Cursor-safe resize edge bar (`height: 5`) that balances `NSCursor.push/pop` cleanly on hover & disappear.
-private struct SafeResizeEdgeBar: View {
+/// AppKit-backed vertical resize handle for day-span & hourly-slot cards.
+/// Uses native `resetCursorRects()` (`.resizeUpDown`) and screen-space `NSEvent.mouseLocation.y`
+/// drag tracking so resizing responds on the very first pixel, keeps the ↕ cursor locked throughout,
+/// and never loses drags to enclosing `ScrollView` or card tap/move gestures.
+private struct CardVerticalResizeEdge: View {
     let color: Color
     let isActive: Bool
-    let isHovered: Bool
+    let isCardHovered: Bool
+    let hitHeight: CGFloat
+    let pillAlignment: Alignment
+    let helpText: String
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: (CGFloat) -> Void
 
-    @State private var didPushCursor = false
+    @State private var isHandleHovered = false
+
+    private var pillWidth: CGFloat {
+        (isActive || isHandleHovered) ? 42 : 30
+    }
+
+    private var pillHeight: CGFloat {
+        (isActive || isHandleHovered) ? 3.5 : 2.5
+    }
+
+    private var pillOpacity: Double {
+        if isActive {
+            return 1.0
+        }
+        if isHandleHovered {
+            return 0.90
+        }
+        if isCardHovered {
+            return 0.50
+        }
+        return 0.0
+    }
 
     var body: some View {
-        Capsule()
-            .fill(isActive ? color : (isHovered ? color.opacity(0.55) : Color.clear))
-            .frame(width: 28, height: 2.5)
-            .frame(maxWidth: .infinity)
-            .frame(height: 5)
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                if hovering && !didPushCursor {
-                    NSCursor.resizeUpDown.push()
-                    didPushCursor = true
-                } else if !hovering && didPushCursor {
-                    NSCursor.pop()
-                    didPushCursor = false
-                }
+        ZStack(alignment: pillAlignment) {
+            Capsule()
+                .fill(color.opacity(pillOpacity))
+                .frame(width: pillWidth, height: pillHeight)
+                .allowsHitTesting(false)
+                .animation(.easeOut(duration: 0.12), value: isHandleHovered)
+
+            VerticalResizeMouseCatcher(
+                onHoverChanged: { hovering in
+                    isHandleHovered = hovering
+                },
+                onDragChanged: onDragChanged,
+                onDragEnded: onDragEnded
+            )
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: hitHeight)
+        .contentShape(Rectangle())
+        .help(helpText)
+    }
+}
+
+private struct VerticalResizeMouseCatcher: NSViewRepresentable {
+    let onHoverChanged: (Bool) -> Void
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> VerticalResizeMouseNSView {
+        let view = VerticalResizeMouseNSView()
+        view.onHoverChanged = onHoverChanged
+        view.onDragChanged = onDragChanged
+        view.onDragEnded = onDragEnded
+        return view
+    }
+
+    func updateNSView(_ nsView: VerticalResizeMouseNSView, context: Context) {
+        nsView.onHoverChanged = onHoverChanged
+        nsView.onDragChanged = onDragChanged
+        nsView.onDragEnded = onDragEnded
+    }
+}
+
+private final class VerticalResizeMouseNSView: NSView {
+    var onHoverChanged: ((Bool) -> Void)?
+    var onDragChanged: ((CGFloat) -> Void)?
+    var onDragEnded: ((CGFloat) -> Void)?
+
+    private var initialMouseScreenY: CGFloat = 0
+    private var isDragging = false
+    private var hasMoved = false
+    private var isPointerInside = false
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil && (isPointerInside || isDragging) {
+            isDragging = false
+            hasMoved = false
+            isPointerInside = false
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.resizeUpDown.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isPointerInside = true
+        NSCursor.resizeUpDown.set()
+        onHoverChanged?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isPointerInside = false
+        if !isDragging {
+            NSCursor.arrow.set()
+            onHoverChanged?(false)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        initialMouseScreenY = NSEvent.mouseLocation.y
+        isDragging = true
+        hasMoved = false
+        NSCursor.resizeUpDown.set()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        NSCursor.resizeUpDown.set()
+        let dy = initialMouseScreenY - NSEvent.mouseLocation.y
+        hasMoved = true
+        onDragChanged?(dy)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isDragging else { return }
+        let dy = initialMouseScreenY - NSEvent.mouseLocation.y
+        let didMove = hasMoved
+        isDragging = false
+        hasMoved = false
+
+        if didMove {
+            onDragEnded?(dy)
+        }
+
+        if let window {
+            let ptInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+            let ptInSelf = convert(ptInWindow, from: nil)
+            let stillInside = bounds.contains(ptInSelf)
+            isPointerInside = stillInside
+            onHoverChanged?(stillInside)
+            if stillInside {
+                NSCursor.resizeUpDown.set()
+            } else {
+                NSCursor.arrow.set()
             }
-            .onDisappear {
-                if didPushCursor {
-                    NSCursor.pop()
-                    didPushCursor = false
-                }
-            }
+            window.invalidateCursorRects(for: self)
+        } else {
+            isPointerInside = false
+            onHoverChanged?(false)
+            NSCursor.arrow.set()
+        }
     }
 }
 
