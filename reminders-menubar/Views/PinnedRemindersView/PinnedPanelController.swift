@@ -83,10 +83,32 @@ private final class ResizeHandleNSView: NSView {
     }
 }
 
-/// NSHostingView subclass that makes the transparent GPU shadow margin 100% click-through
-/// so underlying desktop windows receive mouse events right up to the visible card border.
-private final class ShadowPassthroughHostingView<Content: View>: NSHostingView<Content> {
+/// AppKit container hosting a SwiftUI `NSHostingView` inside a transparent GPU shadow margin.
+/// Keeping `NSHostingView` as a subview (instead of `panel.contentView`) prevents SwiftUI from
+/// overwriting `panel.minSize`/`maxSize` on macOS 13+, while making the outer shadow inset
+/// 100% click-through so desktop windows receive mouse events right up to the visible card border.
+private final class ShadowPassthroughContainerView: NSView {
     var cardInset: CGFloat = PinnedPanelController.shadowInset
+
+    init<Content: View>(rootView: Content, frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        autoresizingMask = [.width, .height]
+
+        let hostingView = NSHostingView(rootView: rootView)
+        if #available(macOS 13.0, *) {
+            hostingView.sizingOptions = []
+        }
+        hostingView.wantsLayer = true
+        hostingView.frame = bounds
+        hostingView.autoresizingMask = [.width, .height]
+        addSubview(hostingView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let cardRect = bounds.insetBy(dx: cardInset, dy: cardInset)
@@ -524,21 +546,18 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         PinnedRemindersStore.shared.activeTab = targetTab
 
         let token = nextModeTransitionToken()
+        frameAnimationToken += 1
         let mini = ensureMiniPanel(for: targetTab)
 
         let screenFrame = previousMainPanel.map { currentVisibleFrame(for: $0) } ?? currentVisibleFrame(for: mini)
         let size = miniSize(for: targetTab)
-        let cornerCardFrame = NSRect(
-            x: screenFrame.maxX - size.width - Self.cornerInset,
-            y: screenFrame.maxY - size.height - Self.cornerInset,
-            width: size.width,
-            height: size.height
-        )
+        let cornerCardFrame = topRightCornerCardFrame(for: size, in: screenFrame)
         let cornerWindowFrame = paddedWindowFrame(for: cornerCardFrame)
 
         configureMiniConstraints(for: targetTab, on: mini, cardWidth: cornerCardFrame.width)
         isProgrammaticFrameUpdate = true
         mini.setFrame(cornerWindowFrame, display: false)
+        mini.layoutIfNeeded()
         isProgrammaticFrameUpdate = false
 
         guard shouldAnimateFromMain, let outgoingMain = previousMainPanel else {
@@ -555,7 +574,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             outgoing: outgoingMain,
             incoming: mini,
             outgoingCardFrame: cardFrame(from: outgoingMain.frame),
-            incomingCardFrame: cornerCardFrame,
+            incomingCardFrame: cardFrame(from: mini.frame),
             expanding: false,
             token: token
         )
@@ -573,17 +592,25 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         let targetTab = PinnedRemindersStore.shared.activeTab
         let screenFrame = currentVisibleFrame(for: miniPanel)
         let size = miniSize(for: targetTab)
-        let cornerCardFrame = NSRect(
-            x: screenFrame.maxX - size.width - Self.cornerInset,
-            y: screenFrame.maxY - size.height - Self.cornerInset,
-            width: size.width,
-            height: size.height
-        )
-        configureMiniConstraints(for: targetTab, on: miniPanel, cardWidth: cornerCardFrame.width)
-        animateFrame(of: miniPanel, to: paddedWindowFrame(for: cornerCardFrame), duration: 0.24)
+        let cornerCardFrame = topRightCornerCardFrame(for: size, in: screenFrame)
+        let targetWindowFrame = paddedWindowFrame(for: cornerCardFrame)
+        prepareMiniConstraintsForFrameTransition(on: miniPanel, to: targetWindowFrame)
+        animateFrame(of: miniPanel, to: targetWindowFrame, duration: 0.24) { [weak self, weak miniPanel] in
+            guard let self, let miniPanel else { return }
+            let currentTab = PinnedRemindersStore.shared.activeTab
+            self.configureMiniConstraints(
+                for: currentTab,
+                on: miniPanel,
+                cardWidth: self.cardFrame(from: miniPanel.frame).width
+            )
+        }
     }
 
     func switchCornerMiniTab(_ tab: BoardTab) {
+        let previousTab = PinnedRemindersStore.shared.activeTab
+        if previousTab == .notes && tab != .notes {
+            miniPanel?.makeFirstResponder(nil)
+        }
         PinnedRemindersStore.shared.activeTab = tab
         guard isCornerMiniMode, let miniPanel else { return }
 
@@ -598,13 +625,24 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             min: screenFrame.minX,
             max: max(screenFrame.minX, screenFrame.maxX - size.width)
         )
+        let maxCardTopY = screenFrame.maxY - Self.shadowInset
         let originY = (anchorMaxY - size.height).constrainedTo(
             min: screenFrame.minY,
-            max: max(screenFrame.minY, screenFrame.maxY - size.height)
+            max: max(screenFrame.minY, maxCardTopY - size.height)
         )
         let targetCardFrame = NSRect(x: originX, y: originY, width: size.width, height: size.height)
-        configureMiniConstraints(for: tab, on: miniPanel, cardWidth: targetCardFrame.width)
-        animateFrame(of: miniPanel, to: paddedWindowFrame(for: targetCardFrame), duration: 0.24)
+        let targetWindowFrame = paddedWindowFrame(for: targetCardFrame)
+
+        prepareMiniConstraintsForFrameTransition(on: miniPanel, to: targetWindowFrame)
+        animateFrame(of: miniPanel, to: targetWindowFrame, duration: 0.24) { [weak self, weak miniPanel] in
+            guard let self, let miniPanel else { return }
+            let currentTab = PinnedRemindersStore.shared.activeTab
+            self.configureMiniConstraints(
+                for: currentTab,
+                on: miniPanel,
+                cardWidth: self.cardFrame(from: miniPanel.frame).width
+            )
+        }
         if PinnedRemindersStore.shared.isPanelVisible {
             miniPanel.makeKey()
         }
@@ -628,6 +666,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         }
 
         let token = nextModeTransitionToken()
+        frameAnimationToken += 1
         let main = ensureMainPanel()
         let targetCardFrame = expandedCardFrameBeforeSpecialMode ?? restoredCardFrame()
         let targetWindowFrame = paddedWindowFrame(for: targetCardFrame)
@@ -678,7 +717,12 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         return modeTransitionToken
     }
 
-    private func animateFrame(of panel: NSPanel, to frame: NSRect, duration: TimeInterval) {
+    private func animateFrame(
+        of panel: NSPanel,
+        to frame: NSRect,
+        duration: TimeInterval,
+        onComplete: (() -> Void)? = nil
+    ) {
         frameAnimationToken += 1
         let token = frameAnimationToken
         isProgrammaticFrameUpdate = true
@@ -691,8 +735,35 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             Task { @MainActor in
                 guard let self, self.frameAnimationToken == token else { return }
                 self.isProgrammaticFrameUpdate = false
+                onComplete?()
             }
         })
+    }
+
+    private func topRightCornerCardFrame(for size: NSSize, in screenFrame: NSRect) -> NSRect {
+        let topInset = max(Self.cornerInset, Self.shadowInset)
+        let originX = (screenFrame.maxX - size.width - Self.cornerInset).constrainedTo(
+            min: screenFrame.minX,
+            max: max(screenFrame.minX, screenFrame.maxX - size.width)
+        )
+        let originY = (screenFrame.maxY - size.height - topInset).constrainedTo(
+            min: screenFrame.minY,
+            max: max(screenFrame.minY, screenFrame.maxY - Self.shadowInset - size.height)
+        )
+        return NSRect(x: originX, y: originY, width: size.width, height: size.height)
+    }
+
+    private func prepareMiniConstraintsForFrameTransition(on panel: NSPanel, to targetWindowFrame: NSRect) {
+        let maxPaddedListSize = paddedSize(for: Self.maxMiniListSize)
+        panel.minSize = NSSize(
+            width: min(panel.frame.width, targetWindowFrame.width),
+            height: min(panel.frame.height, targetWindowFrame.height)
+        )
+        panel.maxSize = NSSize(
+            width: max(panel.frame.width, maxPaddedListSize.width),
+            height: max(panel.frame.height, maxPaddedListSize.height)
+        )
+        applyMiniWindowLevel(to: panel)
     }
 
     private func miniSize(for tab: BoardTab) -> NSSize {
@@ -706,7 +777,11 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
 
     private func configureMiniConstraints(for tab: BoardTab, on panel: NSPanel, cardWidth: CGFloat) {
         if tab == .pomodoro {
-            let fixedCardSize = NSSize(width: cardWidth, height: Self.miniPomodoroHeight)
+            let clampedWidth = cardWidth.constrainedTo(
+                min: Self.minMiniListSize.width,
+                max: Self.maxMiniListSize.width
+            )
+            let fixedCardSize = NSSize(width: clampedWidth, height: Self.miniPomodoroHeight)
             panel.minSize = paddedSize(for: fixedCardSize)
             panel.maxSize = paddedSize(for: NSSize(width: Self.maxMiniListSize.width, height: Self.miniPomodoroHeight))
         } else {
@@ -820,11 +895,10 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         newPanel.maxSize = paddedSize(for: Self.maxExpandedSize)
         newPanel.delegate = self
 
-        let hostingView = ShadowPassthroughHostingView(rootView: PinnedPanelView())
-        hostingView.wantsLayer = true
-        hostingView.frame = NSRect(origin: .zero, size: initialWindowFrame.size)
-        hostingView.autoresizingMask = [.width, .height]
-        newPanel.contentView = hostingView
+        newPanel.contentView = ShadowPassthroughContainerView(
+            rootView: PinnedPanelView(),
+            frame: NSRect(origin: .zero, size: initialWindowFrame.size)
+        )
 
         isProgrammaticFrameUpdate = true
         newPanel.setFrame(initialWindowFrame, display: false)
@@ -841,12 +915,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
 
         let visibleFrame = defaultScreenVisibleFrame()
         let size = miniSize(for: tab)
-        let initialCardFrame = NSRect(
-            x: visibleFrame.maxX - size.width - Self.cornerInset,
-            y: visibleFrame.maxY - size.height - Self.cornerInset,
-            width: size.width,
-            height: size.height
-        )
+        let initialCardFrame = topRightCornerCardFrame(for: size, in: visibleFrame)
         let initialWindowFrame = paddedWindowFrame(for: initialCardFrame)
 
         let newPanel = PinnedFloatingPanel(
@@ -865,11 +934,10 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         configureMiniConstraints(for: tab, on: newPanel, cardWidth: size.width)
         newPanel.delegate = self
 
-        let hostingView = ShadowPassthroughHostingView(rootView: CornerMiniWindowView())
-        hostingView.wantsLayer = true
-        hostingView.frame = NSRect(origin: .zero, size: initialWindowFrame.size)
-        hostingView.autoresizingMask = [.width, .height]
-        newPanel.contentView = hostingView
+        newPanel.contentView = ShadowPassthroughContainerView(
+            rootView: CornerMiniWindowView(),
+            frame: NSRect(origin: .zero, size: initialWindowFrame.size)
+        )
 
         isProgrammaticFrameUpdate = true
         newPanel.setFrame(initialWindowFrame, display: false)

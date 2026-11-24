@@ -17,27 +17,35 @@ struct CornerMiniWindowView: View {
 
                 Divider().opacity(0.36)
 
-                ZStack {
-                    if mountedMiniTabs.contains(.board) {
-                        miniTabLayer(isActive: pinnedStore.activeTab == .board) {
-                            MiniTaskChecklistView(onTapEdit: { editingItem = $0 })
+                GeometryReader { contentGeo in
+                    ZStack(alignment: .top) {
+                        if mountedMiniTabs.contains(.board) {
+                            miniTabLayer(isActive: pinnedStore.activeTab == .board, size: contentGeo.size) {
+                                MiniTaskChecklistView(onTapEdit: { editingItem = $0 })
+                            }
+                        }
+                        if mountedMiniTabs.contains(.pomodoro) {
+                            miniTabLayer(isActive: pinnedStore.activeTab == .pomodoro, size: contentGeo.size) {
+                                MiniPomodoroCornerContent()
+                            }
+                        }
+                        if mountedMiniTabs.contains(.clipboard) {
+                            miniTabLayer(isActive: pinnedStore.activeTab == .clipboard, size: contentGeo.size) {
+                                ClipboardHistoryView(isMiniMode: true)
+                            }
+                        }
+                        if mountedMiniTabs.contains(.notes) {
+                            miniTabLayer(isActive: pinnedStore.activeTab == .notes, size: contentGeo.size) {
+                                MiniQuickNotesView()
+                            }
                         }
                     }
-                    if mountedMiniTabs.contains(.pomodoro) {
-                        miniTabLayer(isActive: pinnedStore.activeTab == .pomodoro) {
-                            MiniPomodoroCornerContent()
-                        }
-                    }
-                    if mountedMiniTabs.contains(.clipboard) {
-                        miniTabLayer(isActive: pinnedStore.activeTab == .clipboard) {
-                            ClipboardHistoryView(isMiniMode: true)
-                        }
-                    }
-                    if mountedMiniTabs.contains(.notes) {
-                        miniTabLayer(isActive: pinnedStore.activeTab == .notes) {
-                            MiniQuickNotesView()
-                        }
-                    }
+                    .frame(
+                        width: max(0, contentGeo.size.width),
+                        height: max(0, contentGeo.size.height),
+                        alignment: .top
+                    )
+                    .clipped()
                 }
                 .animation(.timingCurve(0.22, 0.94, 0.30, 1.0, duration: 0.22), value: pinnedStore.activeTab)
                 .onAppear {
@@ -91,9 +99,21 @@ struct CornerMiniWindowView: View {
     }
 
     @ViewBuilder
-    private func miniTabLayer<Content: View>(isActive: Bool, @ViewBuilder content: () -> Content) -> some View {
+    private func miniTabLayer<Content: View>(
+        isActive: Bool,
+        size: CGSize,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let safeWidth = max(0, size.width)
+        let safeHeight = max(0, size.height)
+        // Keep inactive list/note tabs laid out at a healthy minimum height while clipped to `safeHeight`
+        // so switching to the compact 138pt Pomodoro HUD neither crushes hidden AppKit editors nor
+        // lets hidden empty states inflate the card height past the mini window bounds.
+        let layoutHeight = isActive ? safeHeight : max(safeHeight, 260)
         content()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: safeWidth, height: layoutHeight, alignment: .top)
+            .frame(width: safeWidth, height: safeHeight, alignment: .top)
+            .clipped()
             .opacity(isActive ? 1 : 0)
             .offset(y: isActive ? 0 : 5)
             .allowsHitTesting(isActive)
@@ -753,8 +773,7 @@ private struct MiniPomodoroCornerContent: View {
                             .padding(.vertical, 2.5)
                             .background(Capsule().fill(accent.opacity(0.14)))
                         }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden)
+                        .modifier(CornerMiniPlainMenuStyle())
                         .fixedSize()
                         .help("切换专注或休息阶段")
                     }
@@ -821,6 +840,21 @@ private struct MiniPomodoroCornerContent: View {
             }
             .frame(height: 2.5)
             .allowsHitTesting(false)
+        }
+    }
+}
+
+private struct CornerMiniPlainMenuStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 13.0, *) {
+            content
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+        } else {
+            content
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
         }
     }
 }
