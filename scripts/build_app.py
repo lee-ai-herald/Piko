@@ -34,6 +34,16 @@ TEMPLATE_CANDIDATES = [
 ]
 
 
+PBXPROJ_PATH = REPO_ROOT / "reminders-menubar.xcodeproj" / "project.pbxproj"
+
+
+def read_marketing_version() -> str | None:
+    if not PBXPROJ_PATH.exists():
+        return None
+    match = re.search(r"MARKETING_VERSION\s*=\s*([^;\s]+);", PBXPROJ_PATH.read_text(encoding="utf-8"))
+    return match.group(1) if match else None
+
+
 def strip_previews(code: str) -> str:
     """Remove all `#Preview ... { ... }` blocks by matching balanced braces."""
     out = []
@@ -154,9 +164,49 @@ extension EnvironmentValues {
 }""",
                 updated,
             )
+        # SwiftPM CLI generates a Bundle.module accessor that looks in Bundle.main.bundleURL
+        # (Piko.app/) and then falls back to the hardcoded build machine path, crashing with
+        # fatalError on other machines when the bundle lives in Contents/Resources/.
+        if "bundle: .module" in updated:
+            bundle_helper = """private enum KeyboardShortcutsResourceBundle {
+\tnonisolated static let current: Bundle = {
+\t\tlet bundleName = "KeyboardShortcuts_KeyboardShortcuts.bundle"
+\t\tlet candidates: [URL?] = [
+\t\t\tBundle.main.resourceURL?.appendingPathComponent(bundleName),
+\t\t\tBundle.main.bundleURL.appendingPathComponent(bundleName)
+\t\t]
+\t\tfor candidate in candidates {
+\t\t\tif let candidate, let bundle = Bundle(url: candidate) {
+\t\t\t\treturn bundle
+\t\t\t}
+\t\t}
+\t\treturn Bundle.main
+\t}()
+}
+
+"""
+            updated = updated.replace(
+                "bundle: .module",
+                "bundle: KeyboardShortcutsResourceBundle.current",
+            )
+            if "enum KeyboardShortcutsResourceBundle" not in updated:
+                updated = re.sub(
+                    r"(?m)^extension String \{",
+                    bundle_helper + "extension String {",
+                    updated,
+                    count=1,
+                )
         if updated != text:
             os.chmod(swift_file, 0o644)
             swift_file.write_text(updated, encoding="utf-8")
+
+    # Guard against any remaining Bundle.module references that could fatalError on other machines.
+    for swift_file in KS_CHECKOUT.rglob("*.swift"):
+        text = swift_file.read_text(encoding="utf-8")
+        if re.search(r"\bBundle\.module\b|bundle:\s*\.module\b", text):
+            raise RuntimeError(
+                f"Unpatched Bundle.module reference remains in {swift_file}"
+            )
 
 
 def escape_strings_value(val: str) -> str:
@@ -281,6 +331,10 @@ def main() -> None:
         info_plist["CFBundleDisplayName"] = APP_NAME
         info_plist["CFBundleExecutable"] = EXECUTABLE_NAME
         info_plist["CFBundleIdentifier"] = BUNDLE_IDENTIFIER
+        marketing_version = read_marketing_version()
+        if marketing_version:
+            info_plist["CFBundleShortVersionString"] = marketing_version
+            info_plist["CFBundleVersion"] = marketing_version
         info_plist["CFBundleIconFile"] = "AppIcon"
         # Remove CFBundleIconName so macOS loads our custom AppIcon.icns instead of
         # falling back to the legacy AppIcon inside Assets.car.
@@ -300,11 +354,13 @@ def main() -> None:
             shutil.copy2(custom_icns, staged / "Contents" / "Resources" / "AppIcon.icns")
 
         ks_bundle = bin_dir / "KeyboardShortcuts_KeyboardShortcuts.bundle"
-        if ks_bundle.exists():
-            dest_ks = staged / "Contents" / "Resources" / "KeyboardShortcuts_KeyboardShortcuts.bundle"
-            if dest_ks.exists():
-                shutil.rmtree(dest_ks)
-            shutil.copytree(ks_bundle, dest_ks, symlinks=True)
+        if not ks_bundle.exists():
+            print(f"ERROR: KeyboardShortcuts resource bundle not found at {ks_bundle}")
+            sys.exit(1)
+        dest_ks = staged / "Contents" / "Resources" / "KeyboardShortcuts_KeyboardShortcuts.bundle"
+        if dest_ks.exists():
+            shutil.rmtree(dest_ks)
+        shutil.copytree(ks_bundle, dest_ks, symlinks=True)
 
         compile_xcstrings_to_lprojs(
             SRC_DIR / "Resources" / "Localizable.xcstrings",
