@@ -8,10 +8,10 @@ extension KeyboardShortcuts.Name {
     static let toggleCornerMiniWindow = Self("ToggleCornerMiniWindow", initial: .init(.m, modifiers: [.control, .option]))
 
     static let allPikoActions: [(name: KeyboardShortcuts.Name, title: String)] = [
-        (.openRemindersMenuBar, "显示 / 隐藏窗口"),
+        (.openRemindersMenuBar, "规划板"),
         (.openClipboardHistory, "剪贴板"),
         (.openQuickNotes, "随笔"),
-        (.toggleCornerMiniWindow, "右上角小窗")
+        (.toggleCornerMiniWindow, "大窗 / 小窗切换")
     ]
 }
 

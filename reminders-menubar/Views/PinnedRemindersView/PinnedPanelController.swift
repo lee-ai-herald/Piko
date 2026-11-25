@@ -451,14 +451,51 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         }
     }
 
+    var isAnyPanelVisible: Bool {
+        (mainPanel?.isVisible == true) || (miniPanel?.isVisible == true)
+    }
+
+    var isVisiblePanelInForeground: Bool {
+        if isCornerMiniMode {
+            return miniPanel?.isVisible == true
+        }
+        guard let mainPanel, mainPanel.isVisible else { return false }
+        if UserPreferences.shared.isBoardAlwaysOnTop {
+            return true
+        }
+        return NSApp.isActive && mainPanel.isKeyWindow
+    }
+
     func show() {
         modeTransitionToken += 1
         resetLayerImmediately(of: mainPanel)
         resetLayerImmediately(of: miniPanel)
 
         if isCornerMiniMode {
-            let mini = ensureMiniPanel(for: PinnedRemindersStore.shared.activeTab)
+            let currentTab = PinnedRemindersStore.shared.activeTab
+            let mini = ensureMiniPanel(for: currentTab)
             mainPanel?.orderOut(nil)
+            if !mini.isVisible {
+                let screenFrame = currentVisibleFrame(for: mini)
+                let size = miniSize(for: currentTab)
+                let currentCard = cardFrame(from: mini.frame)
+                let originX = (currentCard.maxX - size.width).constrainedTo(
+                    min: screenFrame.minX,
+                    max: max(screenFrame.minX, screenFrame.maxX - size.width)
+                )
+                let maxCardTopY = screenFrame.maxY - Self.shadowInset
+                let originY = (currentCard.maxY - size.height).constrainedTo(
+                    min: screenFrame.minY,
+                    max: max(screenFrame.minY, maxCardTopY - size.height)
+                )
+                let targetCard = NSRect(x: originX, y: originY, width: size.width, height: size.height)
+                let targetWindow = paddedWindowFrame(for: targetCard)
+                configureMiniConstraints(for: currentTab, on: mini, cardWidth: targetCard.width)
+                isProgrammaticFrameUpdate = true
+                mini.setFrame(targetWindow, display: false)
+                mini.layoutIfNeeded()
+                isProgrammaticFrameUpdate = false
+            }
             mini.alphaValue = 1
             mini.orderFrontRegardless()
             mini.makeKey()
@@ -472,8 +509,13 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         }
         applyMainWindowLevel(to: panel)
         panel.alphaValue = 1
-        panel.orderFrontRegardless()
-        panel.makeKey()
+        if UserPreferences.shared.isBoardAlwaysOnTop {
+            panel.orderFrontRegardless()
+            panel.makeKey()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        }
         scheduleMiniPrewarmIfNeeded()
     }
 
@@ -686,6 +728,16 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         let targetCardFrame = NSRect(x: originX, y: originY, width: size.width, height: size.height)
         let targetWindowFrame = paddedWindowFrame(for: targetCardFrame)
 
+        if !miniPanel.isVisible {
+            frameAnimationToken += 1
+            configureMiniConstraints(for: tab, on: miniPanel, cardWidth: targetCardFrame.width)
+            isProgrammaticFrameUpdate = true
+            miniPanel.setFrame(targetWindowFrame, display: false)
+            miniPanel.layoutIfNeeded()
+            isProgrammaticFrameUpdate = false
+            return
+        }
+
         prepareMiniConstraintsForFrameTransition(on: miniPanel, to: targetWindowFrame)
         animateFrame(of: miniPanel, to: targetWindowFrame, duration: 0.24) { [weak self, weak miniPanel] in
             guard let self, let miniPanel else { return }
@@ -766,7 +818,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
     }
 
     func toggleCornerMiniMode() {
-        if (isCornerMiniMode || miniPanel?.isVisible == true) && PinnedRemindersStore.shared.isPanelVisible {
+        if isCornerMiniMode && isAnyPanelVisible && PinnedRemindersStore.shared.isPanelVisible {
             exitCornerMiniMode()
         } else {
             enterCornerMiniMode(tab: PinnedRemindersStore.shared.activeTab)

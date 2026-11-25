@@ -12,25 +12,29 @@ struct KeyboardSettingsTab: View {
 
                 SettingsCard(title: "全局呼出") {
                     shortcutRow(
-                        title: "显示 / 隐藏窗口",
+                        title: "规划板",
+                        subtitle: "呼出规划板，再按隐藏",
                         name: .openRemindersMenuBar,
                         isEnabled: $keyboardShortcutService.isOpenRemindersMenuBarEnabled
                     )
 
                     shortcutRow(
                         title: "剪贴板",
+                        subtitle: "呼出剪贴板，再按隐藏",
                         name: .openClipboardHistory,
                         isEnabled: $keyboardShortcutService.isOpenClipboardHistoryEnabled
                     )
 
                     shortcutRow(
                         title: "随笔",
+                        subtitle: "呼出随笔，再按隐藏",
                         name: .openQuickNotes,
                         isEnabled: $keyboardShortcutService.isOpenQuickNotesEnabled
                     )
 
                     shortcutRow(
-                        title: "右上角小窗",
+                        title: "大窗 / 小窗切换",
+                        subtitle: "大窗与右上角小窗互切",
                         name: .toggleCornerMiniWindow,
                         isEnabled: $keyboardShortcutService.isToggleCornerMiniWindowEnabled,
                         showDivider: false
@@ -69,12 +73,13 @@ struct KeyboardSettingsTab: View {
 
     private func shortcutRow(
         title: String,
+        subtitle: String,
         name: KeyboardShortcuts.Name,
         isEnabled: Binding<Bool>,
         showDivider: Bool = true
     ) -> some View {
-        SettingsRow(title, showDivider: showDivider) {
-            HStack(spacing: 8) {
+        SettingsRow(title, subtitle: subtitle, showDivider: showDivider) {
+            HStack(spacing: 6) {
                 KeyboardShortcuts.Recorder(for: name) { newShortcut in
                     if let newShortcut,
                        let conflicting = KeyboardShortcutService.shared.conflictingTitle(
@@ -86,6 +91,16 @@ struct KeyboardSettingsTab: View {
                         refreshConflictState()
                     }
                 }
+                .shortcutValidation { candidate in
+                    if let conflicting = KeyboardShortcutService.shared.conflictingTitle(
+                        for: candidate,
+                        excluding: name
+                    ) {
+                        return .disallow(reason: "该快捷键已被「\(conflicting)」占用，请换一个组合键。")
+                    }
+                    return .allow
+                }
+                .frame(width: 132)
                 .disabled(!isEnabled.wrappedValue)
 
                 Button("默认") {
@@ -93,13 +108,16 @@ struct KeyboardSettingsTab: View {
                     refreshConflictState()
                 }
                 .controlSize(.small)
+                .fixedSize()
                 .disabled(!isEnabled.wrappedValue)
 
                 Toggle("", isOn: isEnabled)
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .labelsHidden()
+                    .fixedSize()
             }
+            .fixedSize(horizontal: true, vertical: false)
         }
     }
 

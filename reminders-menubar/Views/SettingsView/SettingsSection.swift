@@ -68,7 +68,7 @@ struct SettingsRow<Control: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 14) {
+            HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: 13, weight: .regular))
@@ -82,7 +82,7 @@ struct SettingsRow<Control: View>: View {
                     }
                 }
 
-                Spacer(minLength: 12)
+                Spacer(minLength: 4)
 
                 control
             }

@@ -110,7 +110,7 @@ final class PinnedRemindersStore: ObservableObject {
 
     private init() {
         self.schedules = UserPreferences.shared.pinnedSchedules
-        self.isPanelVisible = true
+        self.isPanelVisible = false
         self.isCollapsed = UserPreferences.shared.isPinnedPanelCollapsed
         self.completedTimeRange = UserPreferences.shared.completedTimeRange
         addObservers()
@@ -758,12 +758,11 @@ final class PinnedRemindersStore: ObservableObject {
         }
         isCollapsed = false
         isPanelVisible = true
-        if PinnedPanelController.shared.isCornerMiniMode, let tab {
-            PinnedPanelController.shared.switchCornerMiniTab(tab)
-            PinnedPanelController.shared.show()
-        } else {
-            PinnedPanelController.shared.show()
+        let controller = PinnedPanelController.shared
+        if controller.isCornerMiniMode, let tab {
+            controller.switchCornerMiniTab(tab)
         }
+        controller.show()
     }
 
     func hidePanel() {
@@ -772,16 +771,28 @@ final class PinnedRemindersStore: ObservableObject {
     }
 
     func togglePanelVisibility(tab: BoardTab? = nil) {
-        if isPanelVisible {
+        let controller = PinnedPanelController.shared
+        let actuallyVisible = isPanelVisible && controller.isAnyPanelVisible
+
+        if actuallyVisible {
             if let tab, activeTab != tab {
                 activeTab = tab
                 isCollapsed = false
-                if PinnedPanelController.shared.isCornerMiniMode {
-                    PinnedPanelController.shared.switchCornerMiniTab(tab)
+                if controller.isCornerMiniMode {
+                    controller.switchCornerMiniTab(tab)
                 }
-                PinnedPanelController.shared.show()
+                controller.show()
                 return
             }
+
+            // In non-floating mode, if the window is buried behind another app, bring it to the front
+            // instead of hiding a window the user cannot see.
+            if !controller.isVisiblePanelInForeground {
+                isCollapsed = false
+                controller.show()
+                return
+            }
+
             hidePanel()
         } else {
             showPanel(tab: tab)
