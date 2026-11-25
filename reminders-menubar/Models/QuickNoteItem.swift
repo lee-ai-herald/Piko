@@ -54,6 +54,9 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         didSet { recomputeDerivedText() }
     }
     var rtfData: Data?
+    var imageFileNames: [String] {
+        didSet { recomputeDerivedText() }
+    }
     var colorTag: NoteColorTag
     var isPinned: Bool
     var createdAt: Date
@@ -67,6 +70,7 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         case title
         case content
         case rtfData
+        case imageFileNames
         case colorTag
         case isPinned
         case createdAt
@@ -78,6 +82,7 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         title: String = "",
         content: String = "",
         rtfData: Data? = nil,
+        imageFileNames: [String] = [],
         colorTag: NoteColorTag = .yellow,
         isPinned: Bool = false,
         createdAt: Date = Date(),
@@ -88,12 +93,13 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         self.title = title
         self.content = content
         self.rtfData = rtfData
+        self.imageFileNames = imageFileNames
         self.colorTag = colorTag
         self.isPinned = isPinned
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.revision = revision
-        let computed = Self.computeDisplayAndPreview(title: title, content: content)
+        let computed = Self.computeDisplayAndPreview(title: title, content: content, imageCount: imageFileNames.count)
         self.displayTitle = computed.title
         self.previewText = computed.preview
     }
@@ -104,6 +110,7 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
         let title = try container.decode(String.self, forKey: .title)
         let content = try container.decode(String.self, forKey: .content)
         let rtfData = try container.decodeIfPresent(Data.self, forKey: .rtfData)
+        let imageFileNames = try container.decodeIfPresent([String].self, forKey: .imageFileNames) ?? []
         let colorTag = try container.decode(NoteColorTag.self, forKey: .colorTag)
         let isPinned = try container.decode(Bool.self, forKey: .isPinned)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
@@ -113,6 +120,7 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
             title: title,
             content: content,
             rtfData: rtfData,
+            imageFileNames: imageFileNames,
             colorTag: colorTag,
             isPinned: isPinned,
             createdAt: createdAt,
@@ -121,12 +129,16 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
     }
 
     private mutating func recomputeDerivedText() {
-        let computed = Self.computeDisplayAndPreview(title: title, content: content)
+        let computed = Self.computeDisplayAndPreview(title: title, content: content, imageCount: imageFileNames.count)
         displayTitle = computed.title
         previewText = computed.preview
     }
 
-    private static func computeDisplayAndPreview(title: String, content: String) -> (title: String, preview: String) {
+    private static func computeDisplayAndPreview(
+        title: String,
+        content: String,
+        imageCount: Int
+    ) -> (title: String, preview: String) {
         let trimmedTitle = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
         // Bound work to the leading slice so pasting huge single-line notes stays O(1).
         let sample = content.count > 2_400 ? String(content.prefix(2_400)) : content
@@ -137,16 +149,26 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
             .filter { !$0.isEmpty }
 
         if trimmedTitle.isEmpty {
-            let resolvedTitle = lines.first ?? "空白随笔"
+            let resolvedTitle = lines.first ?? (imageCount > 0 ? "图片随笔" : "空白随笔")
             let remaining = Array(lines.dropFirst())
-            let preview = remaining.isEmpty
-                ? "暂无更多内容"
-                : String(remaining.joined(separator: " ").prefix(280))
+            let preview: String
+            if !remaining.isEmpty {
+                preview = String(remaining.joined(separator: " ").prefix(280))
+            } else if imageCount > 0 {
+                preview = "包含 \(imageCount) 张图片"
+            } else {
+                preview = "暂无更多内容"
+            }
             return (resolvedTitle, preview)
         } else {
-            let preview = lines.isEmpty
-                ? "暂无正文内容"
-                : String(lines.joined(separator: " ").prefix(280))
+            let preview: String
+            if !lines.isEmpty {
+                preview = String(lines.joined(separator: " ").prefix(280))
+            } else if imageCount > 0 {
+                preview = "包含 \(imageCount) 张图片"
+            } else {
+                preview = "暂无正文内容"
+            }
             return (trimmedTitle, preview)
         }
     }

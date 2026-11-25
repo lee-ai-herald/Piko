@@ -477,7 +477,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             mainPanel?.orderOut(nil)
             if !mini.isVisible {
                 let screenFrame = currentVisibleFrame(for: mini)
-                let size = miniSize(for: currentTab)
+                let size = clampedMiniSize(for: currentTab, in: screenFrame)
                 let currentCard = cardFrame(from: mini.frame)
                 let originX = (currentCard.maxX - size.width).constrainedTo(
                     min: screenFrame.minX,
@@ -504,6 +504,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
 
         let panel = ensureMainPanel()
         miniPanel?.orderOut(nil)
+        clampMainPanelToVisibleScreens(panel, display: false)
         if PinnedRemindersStore.shared.isCollapsed {
             applyCollapsedState(true)
         }
@@ -526,16 +527,23 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
     func syncWindowLevelFromPreferences() {
         guard let mainPanel else { return }
         applyMainWindowLevel(to: mainPanel)
-        if !isCornerMiniMode && UserPreferences.shared.isBoardAlwaysOnTop && PinnedRemindersStore.shared.isPanelVisible {
+        let settingsIsActive = NSApp.keyWindow != nil && !(NSApp.keyWindow is NSPanel)
+        if !isCornerMiniMode && UserPreferences.shared.isBoardAlwaysOnTop && PinnedRemindersStore.shared.isPanelVisible && !settingsIsActive {
             mainPanel.orderFrontRegardless()
         }
     }
 
     private func applyMainWindowLevel(to panel: NSPanel) {
         if UserPreferences.shared.isBoardAlwaysOnTop {
+            if !panel.styleMask.contains(.nonactivatingPanel) {
+                panel.styleMask.insert(.nonactivatingPanel)
+            }
             panel.level = .floating
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         } else {
+            if panel.styleMask.contains(.nonactivatingPanel) {
+                panel.styleMask.remove(.nonactivatingPanel)
+            }
             panel.level = .normal
             panel.collectionBehavior = [.managed, .participatesInCycle]
         }
@@ -549,6 +557,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
     func hide() {
         modeTransitionToken += 1
         frameAnimationToken += 1
+        isProgrammaticFrameUpdate = false
         resetLayerImmediately(of: mainPanel)
         resetLayerImmediately(of: miniPanel)
         if let mainPanel {
@@ -566,14 +575,19 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         }
     }
 
+    private var suppressNextCollapseAnimation = false
+
     func resetDefaultBoardSize() {
         modeTransitionToken += 1
+        frameAnimationToken += 1
         resetLayerImmediately(of: mainPanel)
         resetLayerImmediately(of: miniPanel)
         let wasMini = isCornerMiniMode
         isCornerMiniMode = false
         if PinnedRemindersStore.shared.isCollapsed {
+            suppressNextCollapseAnimation = true
             PinnedRemindersStore.shared.isCollapsed = false
+            suppressNextCollapseAnimation = false
         }
         PinnedRemindersStore.shared.isPanelVisible = true
 
@@ -605,16 +619,24 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         panel.maxSize = paddedSize(for: Self.maxExpandedSize)
         applyMainWindowLevel(to: panel)
 
+        let bringFront: () -> Void = {
+            if UserPreferences.shared.isBoardAlwaysOnTop {
+                panel.orderFrontRegardless()
+                panel.makeKey()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+                panel.makeKeyAndOrderFront(nil)
+            }
+        }
+
         if wasMini || !panel.isVisible {
             panel.setFrame(targetWindowFrame, display: false)
             panel.alphaValue = 1
-            panel.orderFrontRegardless()
-            panel.makeKey()
+            bringFront()
             isProgrammaticFrameUpdate = false
         } else {
             panel.alphaValue = 1
-            panel.orderFrontRegardless()
-            panel.makeKey()
+            bringFront()
             animateFrame(of: panel, to: targetWindowFrame, duration: 0.24)
         }
     }
@@ -645,7 +667,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         let mini = ensureMiniPanel(for: targetTab)
 
         let screenFrame = previousMainPanel.map { currentVisibleFrame(for: $0) } ?? currentVisibleFrame(for: mini)
-        let size = miniSize(for: targetTab)
+        let size = clampedMiniSize(for: targetTab, in: screenFrame)
         let cornerCardFrame = topRightCornerCardFrame(for: size, in: screenFrame)
         let cornerWindowFrame = paddedWindowFrame(for: cornerCardFrame)
 
@@ -686,7 +708,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         }
         let targetTab = PinnedRemindersStore.shared.activeTab
         let screenFrame = currentVisibleFrame(for: miniPanel)
-        let size = miniSize(for: targetTab)
+        let size = clampedMiniSize(for: targetTab, in: screenFrame)
         let cornerCardFrame = topRightCornerCardFrame(for: size, in: screenFrame)
         let targetWindowFrame = paddedWindowFrame(for: cornerCardFrame)
         prepareMiniConstraintsForFrameTransition(on: miniPanel, to: targetWindowFrame)
@@ -710,7 +732,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         guard isCornerMiniMode, let miniPanel else { return }
 
         let screenFrame = currentVisibleFrame(for: miniPanel)
-        let size = miniSize(for: tab)
+        let size = clampedMiniSize(for: tab, in: screenFrame)
         let currentCard = cardFrame(from: miniPanel.frame)
 
         // Anchor the top-right corner so the mini header bar stays completely steady when switching tabs
@@ -797,12 +819,20 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             resetLayerImmediately(of: main)
             resetLayerImmediately(of: outgoingMini)
             main.alphaValue = 1
-            main.orderFrontRegardless()
-            main.makeKey()
+            if UserPreferences.shared.isBoardAlwaysOnTop {
+                main.orderFrontRegardless()
+                main.makeKey()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+                main.makeKeyAndOrderFront(nil)
+            }
             outgoingMini?.orderOut(nil)
             return
         }
 
+        if !UserPreferences.shared.isBoardAlwaysOnTop {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         runInstantGPUTransition(
             outgoing: outgoingMini,
             incoming: main,
@@ -855,15 +885,26 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
 
     private func topRightCornerCardFrame(for size: NSSize, in screenFrame: NSRect) -> NSRect {
         let topInset = max(Self.cornerInset, Self.shadowInset)
-        let originX = (screenFrame.maxX - size.width - Self.cornerInset).constrainedTo(
+        let maxW = max(Self.minMiniListSize.width, screenFrame.width - Self.cornerInset)
+        let maxH = max(Self.miniPomodoroHeight, screenFrame.height - topInset)
+        let fitted = NSSize(width: min(size.width, maxW), height: min(size.height, maxH))
+        let originX = (screenFrame.maxX - fitted.width - Self.cornerInset).constrainedTo(
             min: screenFrame.minX,
-            max: max(screenFrame.minX, screenFrame.maxX - size.width)
+            max: max(screenFrame.minX, screenFrame.maxX - fitted.width)
         )
-        let originY = (screenFrame.maxY - size.height - topInset).constrainedTo(
+        let originY = (screenFrame.maxY - fitted.height - topInset).constrainedTo(
             min: screenFrame.minY,
-            max: max(screenFrame.minY, screenFrame.maxY - Self.shadowInset - size.height)
+            max: max(screenFrame.minY, screenFrame.maxY - Self.shadowInset - fitted.height)
         )
-        return NSRect(x: originX, y: originY, width: size.width, height: size.height)
+        return NSRect(x: originX, y: originY, width: fitted.width, height: fitted.height)
+    }
+
+    private func clampedMiniSize(for tab: BoardTab, in screenFrame: NSRect) -> NSSize {
+        let base = miniSize(for: tab)
+        let topInset = max(Self.cornerInset, Self.shadowInset)
+        let maxW = max(Self.minMiniListSize.width, screenFrame.width - Self.cornerInset)
+        let maxH = max(Self.miniPomodoroHeight, screenFrame.height - topInset)
+        return NSSize(width: min(base.width, maxW), height: min(base.height, maxH))
     }
 
     private func prepareMiniConstraintsForFrameTransition(on panel: NSPanel, to targetWindowFrame: NSRect) {
@@ -908,7 +949,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
     // MARK: - Collapse / Resize
 
     func applyCollapsedState(_ collapsed: Bool) {
-        guard let mainPanel, !isCornerMiniMode else { return }
+        guard !suppressNextCollapseAnimation, let mainPanel, !isCornerMiniMode else { return }
 
         let currentCard = cardFrame(from: mainPanel.frame)
         let topLeft = NSPoint(x: currentCard.minX, y: currentCard.maxY)
@@ -1040,7 +1081,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         }
 
         let visibleFrame = defaultScreenVisibleFrame()
-        let size = miniSize(for: tab)
+        let size = clampedMiniSize(for: tab, in: visibleFrame)
         let initialCardFrame = topRightCornerCardFrame(for: size, in: visibleFrame)
         let initialWindowFrame = paddedWindowFrame(for: initialCardFrame)
 
@@ -1105,6 +1146,28 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
+    private func clampMainPanelToVisibleScreens(_ panel: NSPanel, display: Bool) {
+        let curCard = cardFrame(from: panel.frame)
+        let isCollapsed = PinnedRemindersStore.shared.isCollapsed
+        let minSz = isCollapsed
+            ? NSSize(width: Self.minExpandedSize.width, height: Self.collapsedHeight)
+            : Self.minExpandedSize
+        let maxSz = isCollapsed
+            ? NSSize(width: Self.maxExpandedSize.width, height: Self.collapsedHeight)
+            : Self.maxExpandedSize
+        let clamped = clampedCardFrame(curCard, minSize: minSz, maxSize: maxSz, preferredScreen: panel.screen)
+        let targetWin = paddedWindowFrame(for: clamped)
+        if abs(panel.frame.minX - targetWin.minX) > 1
+            || abs(panel.frame.minY - targetWin.minY) > 1
+            || abs(panel.frame.width - targetWin.width) > 1
+            || abs(panel.frame.height - targetWin.height) > 1 {
+            isProgrammaticFrameUpdate = true
+            panel.setFrame(targetWin, display: display)
+            isProgrammaticFrameUpdate = false
+            persistCurrentFrame(for: panel, immediate: true)
+        }
+    }
+
     private func clampPanelsToVisibleScreens() {
         if let expanded = expandedCardFrameBeforeSpecialMode {
             expandedCardFrameBeforeSpecialMode = clampedCardFrame(
@@ -1114,29 +1177,11 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
             )
         }
 
-        if let mainPanel, mainPanel.isVisible {
-            let curCard = cardFrame(from: mainPanel.frame)
-            let isCollapsed = PinnedRemindersStore.shared.isCollapsed
-            let minSz = isCollapsed
-                ? NSSize(width: Self.minExpandedSize.width, height: Self.collapsedHeight)
-                : Self.minExpandedSize
-            let maxSz = isCollapsed
-                ? NSSize(width: Self.maxExpandedSize.width, height: Self.collapsedHeight)
-                : Self.maxExpandedSize
-            let clamped = clampedCardFrame(curCard, minSize: minSz, maxSize: maxSz, preferredScreen: mainPanel.screen)
-            let targetWin = paddedWindowFrame(for: clamped)
-            if abs(mainPanel.frame.minX - targetWin.minX) > 1
-                || abs(mainPanel.frame.minY - targetWin.minY) > 1
-                || abs(mainPanel.frame.width - targetWin.width) > 1
-                || abs(mainPanel.frame.height - targetWin.height) > 1 {
-                isProgrammaticFrameUpdate = true
-                mainPanel.setFrame(targetWin, display: true)
-                isProgrammaticFrameUpdate = false
-                persistCurrentFrame(for: mainPanel, immediate: true)
-            }
+        if let mainPanel {
+            clampMainPanelToVisibleScreens(mainPanel, display: mainPanel.isVisible)
         }
 
-        if let miniPanel, miniPanel.isVisible {
+        if let miniPanel {
             let curCard = cardFrame(from: miniPanel.frame)
             let tab = PinnedRemindersStore.shared.activeTab
             let minSz = tab == .pomodoro
@@ -1152,7 +1197,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
                 || abs(miniPanel.frame.width - targetWin.width) > 1
                 || abs(miniPanel.frame.height - targetWin.height) > 1 {
                 isProgrammaticFrameUpdate = true
-                miniPanel.setFrame(targetWin, display: true)
+                miniPanel.setFrame(targetWin, display: miniPanel.isVisible)
                 isProgrammaticFrameUpdate = false
             }
         }

@@ -37,7 +37,10 @@ struct ReminderEditView: View {
     private let initialStartDate: Date
     private let initialEndDate: Date
     private let initialRecurrence: RmbRecurrenceOption
-    private let initialStartDateKey: String?
+    private let initialHasTimeSlot: Bool
+    private let initialSlotStartMinute: Int
+    private let initialReminderHasDueDate: Bool
+    private let initialReminderHasTime: Bool
 
     private let baseDurationChoices = [30, 60, 90, 120, 180]
     private let baseRecurrenceChoices: [(option: RmbRecurrenceOption, label: String)] = [
@@ -67,7 +70,7 @@ struct ReminderEditView: View {
     }
 
     private var recurrenceChoices: [(option: RmbRecurrenceOption, label: String)] {
-        if recurrence == .custom {
+        if initialRecurrence == .custom || recurrence == .custom {
             return baseRecurrenceChoices + [(.custom, "自定义")]
         }
         return baseRecurrenceChoices
@@ -116,18 +119,24 @@ struct ReminderEditView: View {
         self.initialStartDate = resolvedStart
         self.initialEndDate = resolvedEnd
         self.initialRecurrence = initialRecurrenceOption
-        self.initialStartDateKey = initialDateExists ? PinnedTaskSchedule.dateKey(for: resolvedStart) : nil
+        self.initialReminderHasDueDate = reminder.hasDueDate
+        self.initialReminderHasTime = reminder.hasTime
 
         let targetKey = PinnedTaskSchedule.dateKey(for: resolvedStart)
         if let slot = sched.daySlots[targetKey] {
             _hasTimeSlot = State(initialValue: true)
             _slotStartMinute = State(initialValue: slot.startMinute)
             _slotDurationMinutes = State(initialValue: slot.durationMinutes)
+            self.initialHasTimeSlot = true
+            self.initialSlotStartMinute = slot.startMinute
         } else {
             let curHour = Calendar.current.component(.hour, from: Date())
+            let defaultStart = max(7, min(21, curHour + 1)) * 60
             _hasTimeSlot = State(initialValue: false)
-            _slotStartMinute = State(initialValue: max(7, min(21, curHour + 1)) * 60)
+            _slotStartMinute = State(initialValue: defaultStart)
             _slotDurationMinutes = State(initialValue: 60)
+            self.initialHasTimeSlot = false
+            self.initialSlotStartMinute = defaultStart
         }
     }
 
@@ -160,12 +169,16 @@ struct ReminderEditView: View {
         self.initialStartDate = today
         self.initialEndDate = today
         self.initialRecurrence = .none
-        self.initialStartDateKey = nil
+        self.initialReminderHasDueDate = false
+        self.initialReminderHasTime = false
 
         let curHour = Calendar.current.component(.hour, from: Date())
+        let defaultStart = max(7, min(21, curHour + 1)) * 60
         _hasTimeSlot = State(initialValue: false)
-        _slotStartMinute = State(initialValue: max(7, min(21, curHour + 1)) * 60)
+        _slotStartMinute = State(initialValue: defaultStart)
         _slotDurationMinutes = State(initialValue: 60)
+        self.initialHasTimeSlot = false
+        self.initialSlotStartMinute = defaultStart
     }
 
     var body: some View {
@@ -658,11 +671,17 @@ struct ReminderEditView: View {
         let finalSpan = computedSpanDays
         let finalRecurrence: RmbRecurrenceOption = hasDate ? recurrence : .none
 
+        let timeSlotChanged: Bool = hasDate && (
+            hasTimeSlot != initialHasTimeSlot
+                || (hasTimeSlot && slotStartMinute != initialSlotStartMinute)
+        )
+        let needsDueDateForRecurrence = hasDate && finalRecurrence != .none && !initialReminderHasDueDate
+
         let dateChanged: Bool = {
             if isCreateMode {
                 return hasDate
             }
-            if hasDate != initialHasDate {
+            if hasDate != initialHasDate || timeSlotChanged || needsDueDateForRecurrence {
                 return true
             }
             guard hasDate else { return false }
@@ -674,6 +693,30 @@ struct ReminderEditView: View {
             ? (hasDate && finalRecurrence != .none)
             : (finalRecurrence != initialRecurrence)
 
+        // Preserve time & alarm on Apple Reminders: use explicit slot start time when enabled,
+        // or preserve the existing reminder's time if the user only shifted the date.
+        let resolvedHasTime: Bool
+        let resolvedDueDate: Date
+        if hasDate && hasTimeSlot {
+            resolvedHasTime = true
+            resolvedDueDate = cal.date(
+                bySettingHour: slotStartMinute / 60,
+                minute: slotStartMinute % 60,
+                second: 0,
+                of: endDate
+            ) ?? endDate
+        } else if hasDate,
+                  !initialHasTimeSlot,
+                  initialReminderHasTime,
+                  case .edit(let reminder, _) = mode,
+                  let existingDue = reminder.resolvedDueDate {
+            resolvedHasTime = true
+            resolvedDueDate = endDate.withTime(from: existingDue)
+        } else {
+            resolvedHasTime = false
+            resolvedDueDate = endDate
+        }
+
         var draft = RmbReminder()
         draft.title = trimmed
         draft.notes = notes
@@ -683,8 +726,10 @@ struct ReminderEditView: View {
         draft.hasRecurrenceChanges = recurrenceChanged
         draft.recurrence = finalRecurrence
         draft.hasDueDate = hasDate
-        draft.hasTime = false
-        draft.date = endDate
+        draft.hasTime = resolvedHasTime
+        draft.date = resolvedDueDate
+
+        pinnedStore.invalidateInFlightRefresh()
 
         let targetId: String
         switch mode {
@@ -694,18 +739,11 @@ struct ReminderEditView: View {
             targetId = created.calendarItemIdentifier
         case .edit(let reminder, _):
             reminder.update(with: draft)
-            RemindersService.shared.save(reminder: reminder)
+            guard RemindersService.shared.save(reminder: reminder) else { return }
             targetId = reminder.calendarItemIdentifier
         }
 
         if hasDate {
-            let newStartKey = PinnedTaskSchedule.dateKey(for: startDate)
-            if let oldKey = initialStartDateKey,
-               oldKey != newStartKey,
-               let oldDate = PinnedTaskSchedule.date(fromKey: oldKey) {
-                pinnedStore.clearTimeSlot(for: targetId, on: oldDate)
-            }
-
             pinnedStore.setDaySpan(
                 for: targetId,
                 startDate: startDate,
@@ -717,7 +755,8 @@ struct ReminderEditView: View {
                     for: targetId,
                     on: startDate,
                     startMinute: slotStartMinute,
-                    durationMinutes: slotDurationMinutes
+                    durationMinutes: slotDurationMinutes,
+                    syncReminderDueDate: false
                 )
             } else {
                 pinnedStore.clearTimeSlot(for: targetId, on: startDate)

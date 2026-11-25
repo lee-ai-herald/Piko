@@ -507,6 +507,7 @@ struct PomodoroView: View {
            mins != currentPhaseMinutes {
             pomodoro.setDurationMinutes(mins, for: pomodoro.phase)
         }
+        syncInputField()
     }
 }
 
@@ -599,7 +600,7 @@ private struct PomodoroDialView: View {
                 .padding(.vertical, 3)
                 .background(Capsule().fill(accentColor.opacity(0.11)))
 
-                if !isTiny {
+                if !isTiny && isRunning {
                     Text(ticker.estimatedFinishTimeText)
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundColor(.secondary.opacity(0.85))

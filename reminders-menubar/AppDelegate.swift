@@ -133,12 +133,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openOrToggleBoard(tab: BoardTab?) {
+        // Always allow closing an already-visible panel (e.g. Notes or Clipboard) even without Reminders permission.
+        if tab == nil,
+           PinnedRemindersStore.shared.isPanelVisible,
+           PinnedPanelController.shared.isAnyPanelVisible {
+            PinnedRemindersStore.shared.togglePanelVisibility(tab: nil)
+            return
+        }
+
         let requiresRemindersAuth = (tab != .clipboard && tab != .notes)
         if requiresRemindersAuth && !RemindersService.shared.isAuthorized {
             requestAuthorization()
             return
         }
         PinnedRemindersStore.shared.togglePanelVisibility(tab: tab)
+    }
+
+    func openRemindersPermissionFlow() {
+        requestAuthorization()
     }
 }
 

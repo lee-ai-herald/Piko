@@ -114,5 +114,8 @@ struct GeneralSettingsTab: View {
         .onAppear {
             launchAtLoginService.refresh()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            launchAtLoginService.refresh()
+        }
     }
 }

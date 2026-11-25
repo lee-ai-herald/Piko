@@ -7,9 +7,10 @@ import SwiftUI
 
 struct SemanticVersion: Comparable, Equatable, CustomStringConvertible {
     let components: [Int]
+    let prerelease: [String]
 
     init?(_ raw: String) {
-        let pattern = #"(\d+(?:\.\d+)*)"#
+        let pattern = #"(?:^|[^0-9A-Za-z])v?(\d+(?:\.\d+)+)(?:-([0-9A-Za-z.-]+))?"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
               let range = Range(match.range(at: 1), in: raw) else {
@@ -19,10 +20,18 @@ struct SemanticVersion: Comparable, Equatable, CustomStringConvertible {
         let parts = raw[range].split(separator: ".").compactMap { Int($0) }
         guard !parts.isEmpty else { return nil }
         self.components = parts
+
+        if match.range(at: 2).location != NSNotFound,
+           let preRange = Range(match.range(at: 2), in: raw) {
+            self.prerelease = raw[preRange].split(separator: ".").map(String.init)
+        } else {
+            self.prerelease = []
+        }
     }
 
     var description: String {
-        components.map(String.init).joined(separator: ".")
+        let core = components.map(String.init).joined(separator: ".")
+        return prerelease.isEmpty ? core : "\(core)-\(prerelease.joined(separator: "."))"
     }
 
     static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
@@ -34,7 +43,17 @@ struct SemanticVersion: Comparable, Equatable, CustomStringConvertible {
                 return l < r
             }
         }
-        return false
+        // Per SemVer 2.0: a prerelease version has lower precedence than the corresponding stable release.
+        if lhs.prerelease.isEmpty != rhs.prerelease.isEmpty {
+            return !lhs.prerelease.isEmpty
+        }
+        for (l, r) in zip(lhs.prerelease, rhs.prerelease) where l != r {
+            if let li = Int(l), let ri = Int(r) {
+                return li < ri
+            }
+            return l.localizedStandardCompare(r) == .orderedAscending
+        }
+        return lhs.prerelease.count < rhs.prerelease.count
     }
 
     static func == (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
@@ -271,6 +290,7 @@ final class AppUpdateService: ObservableObject {
     private var periodicCheckTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private var isCheckingInFlight = false
+    private var activeCheckUserInitiated = false
     private var downloadToken = 0
 
     private static let automaticCheckInterval: TimeInterval = 12 * 60 * 60
@@ -340,9 +360,21 @@ final class AppUpdateService: ObservableObject {
     // MARK: - Check Latest GitHub Release
 
     func checkForUpdates(userInitiated: Bool) async {
-        guard !state.isBusy, !isCheckingInFlight else { return }
+        if isCheckingInFlight {
+            // Promote an in-flight silent background check when the user manually clicks "检查更新".
+            if userInitiated && !state.isBusy {
+                activeCheckUserInitiated = true
+                state = .checking
+            }
+            return
+        }
+        guard !state.isBusy else { return }
         isCheckingInFlight = true
-        defer { isCheckingInFlight = false }
+        activeCheckUserInitiated = userInitiated
+        defer {
+            isCheckingInFlight = false
+            activeCheckUserInitiated = false
+        }
 
         if userInitiated {
             state = .checking
@@ -352,8 +384,9 @@ final class AppUpdateService: ObservableObject {
             let release = try await fetchLatestRelease()
             UserPreferences.shared.lastUpdateCheckTimestamp = Date().timeIntervalSince1970
 
+            let promotedUserInitiated = activeCheckUserInitiated
             // Never clobber an active download/install started while a background check was in flight.
-            if !userInitiated && state.isBusy {
+            if !promotedUserInitiated && state.isBusy {
                 return
             }
 
@@ -365,14 +398,19 @@ final class AppUpdateService: ObservableObject {
                 state = .available(release)
             } else {
                 availableRelease = nil
-                if userInitiated {
+                if promotedUserInitiated {
                     state = .upToDate(currentVersion: AppConstants.displayVersion)
-                } else if case .available = state {
-                    state = .idle
+                } else {
+                    switch state {
+                    case .available, .error:
+                        state = .idle
+                    default:
+                        break
+                    }
                 }
             }
         } catch {
-            if userInitiated {
+            if activeCheckUserInitiated {
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 state = .error(message: message, release: availableRelease)
             }
@@ -401,8 +439,18 @@ final class AppUpdateService: ObservableObject {
             return
         }
 
+        // Transition synchronously before spawning the Task so rapid double-clicks cannot launch two downloads.
+        downloadToken += 1
+        let currentToken = downloadToken
+        state = .downloading(
+            release: release,
+            progress: 0,
+            writtenBytes: 0,
+            totalBytes: release.assetSizeBytes ?? 0
+        )
+
         Task { @MainActor in
-            await performDownloadAndInstall(release: release, downloadURL: downloadURL)
+            await performDownloadAndInstall(release: release, downloadURL: downloadURL, token: currentToken)
         }
     }
 
@@ -426,31 +474,38 @@ final class AppUpdateService: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    private func performDownloadAndInstall(release: AppUpdateRelease, downloadURL: URL) async {
+    private func performDownloadAndInstall(release: AppUpdateRelease, downloadURL: URL, token currentToken: Int) async {
         let fm = FileManager.default
         let workDir = fm.temporaryDirectory.appendingPathComponent("PikoUpdate-\(UUID().uuidString)", isDirectory: true)
         do {
             try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
         } catch {
-            state = .error(message: "无法创建临时下载目录：\(error.localizedDescription)", release: release)
+            if downloadToken == currentToken {
+                state = .error(message: "无法创建临时下载目录：\(error.localizedDescription)", release: release)
+            }
             return
         }
         activeWorkDir = workDir
-        downloadToken += 1
-        let currentToken = downloadToken
+        var ownedSession: URLSession?
 
         defer {
-            activeDownloadTask = nil
-            activeDownloadSession?.finishTasksAndInvalidate()
-            activeDownloadSession = nil
+            ownedSession?.finishTasksAndInvalidate()
+            if downloadToken == currentToken {
+                activeDownloadTask = nil
+                activeDownloadSession = nil
+            }
         }
 
         let zipURL = workDir.appendingPathComponent(release.assetName ?? "Piko-update.zip")
         let expectedBytes = release.assetSizeBytes ?? 0
-        state = .downloading(release: release, progress: 0, writtenBytes: 0, totalBytes: expectedBytes)
 
         do {
-            let downloadedZip = try await downloadFile(from: downloadURL, to: zipURL) { [weak self] written, total in
+            let downloadedZip = try await downloadFile(
+                from: downloadURL,
+                to: zipURL,
+                token: currentToken,
+                onSessionCreated: { ownedSession = $0 }
+            ) { [weak self] written, total in
                 Task { @MainActor [weak self] in
                     guard let self, self.downloadToken == currentToken else { return }
                     guard case .downloading = self.state else { return }
@@ -492,6 +547,7 @@ final class AppUpdateService: ObservableObject {
 
             state = .installing(release)
             try launchUpdaterScriptAndTerminate(
+                release: release,
                 targetAppURL: prepared.targetAppURL,
                 stagedAppURL: prepared.stagedAppURL,
                 workDir: workDir
@@ -504,10 +560,12 @@ final class AppUpdateService: ObservableObject {
             return
         } catch UpdateInstallError.targetNotWritable(let stagedAppURL) {
             NSWorkspace.shared.activateFileViewerSelecting([stagedAppURL])
-            state = .error(
-                message: UpdateInstallError.targetNotWritable(stagedAppURL: stagedAppURL).localizedDescription,
-                release: release
-            )
+            if downloadToken == currentToken {
+                state = .error(
+                    message: UpdateInstallError.targetNotWritable(stagedAppURL: stagedAppURL).localizedDescription,
+                    release: release
+                )
+            }
         } catch {
             try? fm.removeItem(at: workDir)
             if activeWorkDir == workDir {
@@ -522,6 +580,8 @@ final class AppUpdateService: ObservableObject {
     private func downloadFile(
         from url: URL,
         to destinationURL: URL,
+        token currentToken: Int,
+        onSessionCreated: (URLSession) -> Void,
         onProgress: @escaping (Int64, Int64) -> Void
     ) async throws -> URL {
         let delegate = UpdateDownloadDelegate(destinationURL: destinationURL, onProgress: onProgress)
@@ -529,6 +589,12 @@ final class AppUpdateService: ObservableObject {
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        onSessionCreated(session)
+
+        guard downloadToken == currentToken else {
+            session.invalidateAndCancel()
+            throw URLError(.cancelled)
+        }
         activeDownloadSession = session
 
         var request = URLRequest(url: url)
@@ -667,6 +733,7 @@ final class AppUpdateService: ObservableObject {
     }
 
     private func launchUpdaterScriptAndTerminate(
+        release: AppUpdateRelease,
         targetAppURL: URL,
         stagedAppURL: URL,
         workDir: URL
@@ -680,7 +747,7 @@ final class AppUpdateService: ObservableObject {
         trap 'rm -rf "$WORKDIR"' EXIT
 
         i=0
-        while kill -0 "$PID" 2>/dev/null && [ $i -lt 80 ]; do
+        while kill -0 "$PID" 2>/dev/null && [ $i -lt 200 ]; do
             sleep 0.1
             i=$((i + 1))
         done
@@ -722,6 +789,18 @@ final class AppUpdateService: ObservableObject {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
+        // Recover gracefully if the helper script times out or fails while the app is still alive.
+        process.terminationHandler = { [weak self] proc in
+            guard proc.terminationStatus != 0 else { return }
+            Task { @MainActor [weak self] in
+                guard let self, case .installing = self.state else { return }
+                self.state = .error(
+                    message: "自动安装未能完成（退出码 \(proc.terminationStatus)），请重试或前往网页手动下载",
+                    release: release
+                )
+            }
+        }
+
         do {
             try process.run()
         } catch {
@@ -732,6 +811,9 @@ final class AppUpdateService: ObservableObject {
         activeWorkDir = nil
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            if NSApp.modalWindow != nil {
+                NSApp.abortModal()
+            }
             NSApp.terminate(nil)
         }
     }
@@ -796,6 +878,12 @@ final class AppUpdateService: ObservableObject {
 
         func isCompatible(_ name: String) -> Bool {
             let lower = name.lowercased()
+            if lower.contains("universal") {
+                return true
+            }
+            if lower.contains("arm64") && (lower.contains("x86_64") || lower.contains("intel") || lower.contains("amd64")) {
+                return true
+            }
             return !incompatibleTokens.contains(where: { lower.contains($0) })
         }
 
@@ -819,16 +907,37 @@ final class AppUpdateService: ObservableObject {
 
     nonisolated static func extractSHA256(for assetName: String, from releaseNotes: String) -> String? {
         let escapedName = NSRegularExpression.escapedPattern(for: assetName)
-        let patterns = [
-            "\(escapedName)[^0-9a-fA-F\\n]*([0-9a-fA-F]{64})",
-            "([0-9a-fA-F]{64})[^\\n]*\(escapedName)"
-        ]
-        let fullRange = NSRange(releaseNotes.startIndex..., in: releaseNotes)
-        for pattern in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern),
-               let match = regex.firstMatch(in: releaseNotes, range: fullRange),
-               let range = Range(match.range(at: 1), in: releaseNotes) {
-                return String(releaseNotes[range]).lowercased()
+        guard let nameRegex = try? NSRegularExpression(
+            pattern: "(?<![A-Za-z0-9._-])\(escapedName)(?![A-Za-z0-9._-])"
+        ),
+              let hashRegex = try? NSRegularExpression(
+                pattern: "(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])"
+              ) else {
+            return nil
+        }
+
+        for line in releaseNotes.components(separatedBy: .newlines) {
+            let lineRange = NSRange(line.startIndex..., in: line)
+            guard let nameMatch = nameRegex.firstMatch(in: line, range: lineRange) else {
+                continue
+            }
+            let hashes = hashRegex.matches(in: line, range: lineRange)
+            guard !hashes.isEmpty else { continue }
+
+            let nameEnd = NSMaxRange(nameMatch.range)
+            let nameStart = nameMatch.range.location
+
+            // Prefer the closest standalone 64-hex token AFTER the exact filename (e.g. `file.zip (SHA-256): <hash>`),
+            // otherwise fall back to the closest standalone 64-hex token BEFORE it (e.g. `shasum -a 256` output).
+            let chosenMatch = hashes
+                .filter { $0.range.location >= nameEnd }
+                .min(by: { $0.range.location < $1.range.location })
+                ?? hashes
+                .filter { NSMaxRange($0.range) <= nameStart }
+                .max(by: { NSMaxRange($0.range) < NSMaxRange($1.range) })
+
+            if let match = chosenMatch, let swiftRange = Range(match.range(at: 1), in: line) {
+                return String(line[swiftRange]).lowercased()
             }
         }
         return nil

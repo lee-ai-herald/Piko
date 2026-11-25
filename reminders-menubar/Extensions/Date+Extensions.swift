@@ -26,20 +26,6 @@ extension Date {
         return Date().timeIntervalSince(self)
     }
     
-    static func nextExactHour(of date: Date = Date(), allowDayChange: Bool = false) -> Date {
-        let today = Date()
-        let todayNextHour = Calendar.current.date(byAdding: .hour, value: 1, to: today)!
-        let isNextHourChangingDay = !todayNextHour.isToday
-        
-        var hourComponent = Calendar.current.dateComponents([.hour], from: today)
-        if allowDayChange || !isNextHourChangingDay {
-            hourComponent.hour! += 1
-        }
-        
-        let dateWithoutTime = Calendar.current.date(bySettingHour: 0, minute: 0, second: 0, of: date)!
-        return Calendar.current.date(byAdding: hourComponent, to: dateWithoutTime)!
-    }
-    
     static func nextYear(of date: Date = Date()) -> Date {
         return Calendar.current.date(byAdding: .year, value: 1, to: date) ?? date
     }
@@ -58,43 +44,16 @@ extension Date {
             of: self
         ) ?? self
     }
-    
-    func relativeDateDescription(withTime showTimeDescription: Bool) -> String {
-        return dateDescription(withTime: showTimeDescription, relativeFormatting: true)
-    }
 
-    func absoluteDateDescription(withTime showTimeDescription: Bool) -> String {
-        return dateDescription(withTime: showTimeDescription, relativeFormatting: false)
-    }
-
-    private func dateDescription(withTime showTimeDescription: Bool, relativeFormatting: Bool) -> String {
-        let locale = rmbDateTimeFormattedLocale()
-        let dateFormatter = DateFormatter()
-
-        dateFormatter.dateStyle = .medium
-        dateFormatter.timeStyle = .none
-        dateFormatter.locale = locale
-        dateFormatter.doesRelativeDateFormatting = relativeFormatting
-        let dateString = dateFormatter.string(from: self)
-
-        guard showTimeDescription else {
-            return dateString
-        }
-
-        dateFormatter.doesRelativeDateFormatting = false
-        dateFormatter.dateStyle = .none
-        // NOTE: "jm" adapts hour format (12h/24h) to the locale's hour cycle preference
-        dateFormatter.dateFormat = DateFormatter.dateFormat(fromTemplate: "jm", options: 0, locale: locale)
-        let timeString = dateFormatter.string(from: self)
-
-        return "\(dateString), \(timeString)"
-    }
-    
+    /// EventKit requires Gregorian calendar components for reminder due/start dates; using
+    /// `Calendar.current` crashes with `NSInvalidArgumentException` on non-Gregorian system calendars.
     func dateComponents(withTime: Bool) -> DateComponents {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = .current
         var components: Set<Calendar.Component> = [.calendar, .era, .year, .month, .day]
         if withTime {
             components.formUnion([.timeZone, .hour, .minute, .second])
         }
-        return Calendar.current.dateComponents(components, from: self)
+        return gregorian.dateComponents(components, from: self)
     }
 }

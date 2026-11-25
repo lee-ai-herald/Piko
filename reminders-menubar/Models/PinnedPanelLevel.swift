@@ -74,10 +74,10 @@ struct DayTimeSlot: Codable, Equatable {
     var durationMinutes: Int
 
     init(startMinute: Int, durationMinutes: Int = 60) {
-        let dur = max(15, min(480, DayTimeSlot.snap(durationMinutes)))
-        let maxStart = max(0, 24 * 60 - dur)
-        self.startMinute = max(0, min(maxStart, DayTimeSlot.snap(startMinute)))
-        self.durationMinutes = dur
+        let clampedStart = max(0, min(24 * 60 - 15, DayTimeSlot.snap(startMinute)))
+        let maxDuration = max(15, min(480, 24 * 60 - clampedStart))
+        self.startMinute = clampedStart
+        self.durationMinutes = max(15, min(maxDuration, DayTimeSlot.snap(durationMinutes)))
     }
 
     var endMinute: Int {
@@ -207,8 +207,14 @@ struct PinnedTaskSchedule: Codable, Equatable {
         return "\(RmbFormatters.monthDay.string(from: start))–\(RmbFormatters.monthDay.string(from: end)) · \(spanDays)天"
     }
 
+    private static func gregorianCalendar() -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        return cal
+    }
+
     static func dateKey(for date: Date) -> String {
-        let comps = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        let comps = gregorianCalendar().dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", comps.year ?? 2026, comps.month ?? 1, comps.day ?? 1)
     }
 
@@ -219,7 +225,7 @@ struct PinnedTaskSchedule: Codable, Equatable {
         comps.year = parts[0]
         comps.month = parts[1]
         comps.day = parts[2]
-        return Calendar.current.date(from: comps)
+        return gregorianCalendar().date(from: comps)
     }
 
     static func dayDifference(from start: Date, to end: Date) -> Int {

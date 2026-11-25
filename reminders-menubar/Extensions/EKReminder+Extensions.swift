@@ -3,10 +3,19 @@ import EventKit
 extension EKReminder {
     // MARK: - Computed properties
 
-    /// Resolves `dueDateComponents` reliably even when CalDAV/Exchange omits `components.calendar`.
+    private static func gregorianCalendar() -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        return cal
+    }
+
+    /// Resolves `dueDateComponents` reliably even when CalDAV/Exchange omits `components.calendar`
+    /// or the system uses a non-Gregorian calendar.
     var resolvedDueDate: Date? {
         guard let components = dueDateComponents else { return nil }
-        return components.date ?? Calendar.current.date(from: components)
+        return components.date
+            ?? Self.gregorianCalendar().date(from: components)
+            ?? Calendar.current.date(from: components)
     }
 
     private var maxDueDate: Date? {
@@ -32,7 +41,17 @@ extension EKReminder {
 
     var ekPriority: EKReminderPriority {
         get {
-            EKReminderPriority(rawValue: UInt(self.priority)) ?? .none
+            // Map full RFC 5545 priority ranges (1–4 high, 5 medium, 6–9 low) instead of dropping 2–4 / 6–8.
+            switch self.priority {
+            case 1...4:
+                return .high
+            case 5:
+                return .medium
+            case 6...9:
+                return .low
+            default:
+                return .none
+            }
         }
         set {
             self.priority = Int(newValue.rawValue)
@@ -66,7 +85,7 @@ extension EKReminder {
             startDateComponents = dateComponents
         }
 
-        if hasTime, let alarmDate = dateComponents.date ?? Calendar.current.date(from: dateComponents) {
+        if hasTime, let alarmDate = dateComponents.date ?? Self.gregorianCalendar().date(from: dateComponents) {
             let ekAlarm = EKAlarm(absoluteDate: alarmDate)
             addAlarm(ekAlarm)
         }
@@ -121,13 +140,8 @@ extension EKReminder {
 
         notes = rmbReminder.notes.isEmpty ? nil : rmbReminder.notes
 
-        if rmbReminder.hasDateChanges {
-            removeDueDateAndAlarms()
-            if rmbReminder.hasDueDate {
-                addDueDateAndAlarm(for: rmbReminder.date, withTime: rmbReminder.hasTime)
-            }
-        }
-
+        // Apply recurrence changes before date changes so `addDueDateAndAlarm` sees the updated
+        // `hasRecurrenceRules` flag and populates `startDateComponents` consistently.
         if rmbReminder.hasRecurrenceChanges {
             switch rmbReminder.recurrence {
             case .custom:
@@ -139,6 +153,21 @@ extension EKReminder {
                 if let rule = rmbReminder.recurrence.ekRecurrenceRule {
                     addRecurrenceRule(rule)
                 }
+            }
+        }
+
+        if rmbReminder.hasDateChanges {
+            removeDueDateAndAlarms()
+            if rmbReminder.hasDueDate {
+                addDueDateAndAlarm(for: rmbReminder.date, withTime: rmbReminder.hasTime)
+            }
+        } else if rmbReminder.hasRecurrenceChanges {
+            if hasRecurrenceRules {
+                if let due = dueDateComponents, startDateComponents == nil {
+                    startDateComponents = due
+                }
+            } else {
+                startDateComponents = nil
             }
         }
 

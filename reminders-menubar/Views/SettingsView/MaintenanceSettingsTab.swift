@@ -6,9 +6,11 @@ struct MaintenanceSettingsTab: View {
     @ObservedObject private var panelController = PinnedPanelController.shared
     @ObservedObject private var userPreferences = UserPreferences.shared
     @ObservedObject private var updateService = AppUpdateService.shared
+    @State private var authRefreshTick = 0
 
     private var isAuthorized: Bool {
-        RemindersService.shared.isAuthorized
+        _ = authRefreshTick
+        return RemindersService.shared.isAuthorized
     }
 
     private var systemDefaultCalendarId: String? {
@@ -52,11 +54,11 @@ struct MaintenanceSettingsTab: View {
         }
         if let preferredId = userPreferences.preferredCalendarIdentifierForSaving,
            let preferred = pinnedStore.syncedCalendars.first(where: { $0.calendarIdentifier == preferredId }) {
-            return "快速新建及随笔转任务将写入「\(preferred.title)」"
+            return "新建任务写入「\(preferred.title)」"
         }
         if let defaultId = systemDefaultCalendarId,
            !userPreferences.isCalendarSynced(defaultId) {
-            return "系统默认列表已关闭，当前自动写入「\(autoSavingCalendarTitle)」"
+            return "默认已关闭，写入「\(autoSavingCalendarTitle)」"
         }
         return "未指定时跟随系统默认列表"
     }
@@ -222,7 +224,7 @@ struct MaintenanceSettingsTab: View {
                     }
 
                     SettingsRow("右上角小窗", showDivider: false) {
-                        Button(panelController.isCornerMiniMode ? "展开主窗口" : "切换至小窗") {
+                        Button((panelController.isCornerMiniMode && pinnedStore.isPanelVisible) ? "展开主窗口" : "切换至小窗") {
                             panelController.toggleCornerMiniMode()
                         }
                         .controlSize(.small)
@@ -310,6 +312,12 @@ struct MaintenanceSettingsTab: View {
                 pinnedStore.requestRefresh()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            authRefreshTick += 1
+            if RemindersService.shared.isAuthorized {
+                pinnedStore.requestRefresh()
+            }
+        }
     }
 
     // MARK: - Software Update Card
@@ -341,7 +349,9 @@ struct MaintenanceSettingsTab: View {
         case .upToDate(let current):
             return "已是最新版本（\(current)）"
         case .available(let release):
-            return "当前 \(AppConstants.displayVersion) → 最新 \(release.displayVersion) · 支持一键下载并自动重启"
+            return release.isDirectZipInstallable
+                ? "当前 \(AppConstants.displayVersion) → 最新 \(release.displayVersion) · 支持一键下载并自动重启"
+                : "当前 \(AppConstants.displayVersion) → 最新 \(release.displayVersion) · 前往 GitHub 页面手动下载"
         case .downloading(_, let progress, let written, let total):
             let pct = Int((progress * 100).rounded())
             if total > 0 {
@@ -464,6 +474,13 @@ struct MaintenanceSettingsTab: View {
                 .controlSize(.small)
         case .available(let release):
             HStack(spacing: 6) {
+                Button("重新检查") {
+                    Task {
+                        await updateService.checkForUpdates(userInitiated: true)
+                    }
+                }
+                .controlSize(.small)
+
                 Button(release.isDirectZipInstallable ? "下载并更新" : "前往下载") {
                     updateService.downloadAndInstallUpdate()
                 }
@@ -477,18 +494,18 @@ struct MaintenanceSettingsTab: View {
             .controlSize(.small)
         case .error(_, let release):
             HStack(spacing: 6) {
+                Button("重新检查") {
+                    Task {
+                        await updateService.checkForUpdates(userInitiated: true)
+                    }
+                }
+                .controlSize(.small)
+
                 if let release, release.isDirectZipInstallable {
                     Button("重试更新") {
                         updateService.downloadAndInstallUpdate()
                     }
                     .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                } else {
-                    Button("重试检查") {
-                        Task {
-                            await updateService.checkForUpdates(userInitiated: true)
-                        }
-                    }
                     .controlSize(.small)
                 }
             }

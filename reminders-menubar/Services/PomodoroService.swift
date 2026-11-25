@@ -88,6 +88,7 @@ final class PomodoroService: ObservableObject {
 
     private var timer: Timer?
     private var phaseEndDate: Date?
+    private var sleepStartedAt: Date?
     private var focusStreakInCycle: Int
     private var bannerDismissWork: DispatchWorkItem?
     private var cancellables: Set<AnyCancellable> = []
@@ -102,31 +103,47 @@ final class PomodoroService: ObservableObject {
         Publishers.MergeMany(
             UserPreferences.shared.$pomodoroFocusMinutes.dropFirst().map { _ in }.eraseToAnyPublisher(),
             UserPreferences.shared.$pomodoroShortBreakMinutes.dropFirst().map { _ in }.eraseToAnyPublisher(),
-            UserPreferences.shared.$pomodoroLongBreakMinutes.dropFirst().map { _ in }.eraseToAnyPublisher(),
-            UserPreferences.shared.$pomodoroShowInMenuBar.dropFirst().map { _ in }.eraseToAnyPublisher()
+            UserPreferences.shared.$pomodoroLongBreakMinutes.dropFirst().map { _ in }.eraseToAnyPublisher()
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
             guard let self else { return }
-            if !self.isRunning && self.ticker.remainingSeconds == self.ticker.totalSeconds {
+            if !self.isRunning && self.ticker.totalSeconds != self.phase.defaultDurationMinutes * 60 {
                 self.resetCurrentPhase()
             }
             self.notifyMenuBar()
         }
         .store(in: &cancellables)
 
-        NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+        UserPreferences.shared.$pomodoroShowInMenuBar
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refreshDailyCounterIfNeeded()
+                self?.notifyMenuBar()
+            }
+            .store(in: &cancellables)
+
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: .NSCalendarDayChanged),
+            NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.refreshDailyCounterIfNeeded()
+        }
+        .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.sleepStartedAt = Date()
             }
             .store(in: &cancellables)
 
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.refreshDailyCounterIfNeeded()
-                self?.syncWallClockTick()
+                self?.handleSystemWake()
             }
             .store(in: &cancellables)
     }
@@ -177,13 +194,22 @@ final class PomodoroService: ObservableObject {
 
     func pause() {
         if let endDate = phaseEndDate, isRunning {
-            ticker.remainingSeconds = max(0, Int(ceil(endDate.timeIntervalSinceNow)))
+            let remaining = Int(ceil(endDate.timeIntervalSinceNow))
+            if remaining <= 0 {
+                completeCurrentPhase(playSound: true, countFocus: true)
+                return
+            }
+            ticker.remainingSeconds = remaining
         }
+        stopTimerOnly()
+        notifyMenuBar()
+    }
+
+    private func stopTimerOnly() {
         phaseEndDate = nil
         isRunning = false
         timer?.invalidate()
         timer = nil
-        notifyMenuBar()
     }
 
     func resetCurrentPhase() {
@@ -238,11 +264,44 @@ final class PomodoroService: ObservableObject {
         linkedTaskTitle = nil
     }
 
+    func reconcileLinkedTask(with activeItems: [ReminderItem]) {
+        guard let linkedTaskId else { return }
+        if let matched = activeItems.first(where: { $0.id == linkedTaskId }) {
+            let title = matched.reminder.title ?? ""
+            if linkedTaskTitle != title {
+                linkedTaskTitle = title
+            }
+        } else {
+            clearLinkedTask()
+        }
+    }
+
     func skipPhase() {
         completeCurrentPhase(playSound: false, countFocus: false)
     }
 
     // MARK: - Wall-Clock Tick & Completion
+
+    private func handleSystemWake() {
+        let sleptAt = sleepStartedAt
+        sleepStartedAt = nil
+        let now = Date()
+
+        // If the timer expired while the Mac was asleep across midnight or for > 60s, reset cleanly
+        // rather than crediting a phantom pomodoro to today or firing a stale completion chime.
+        if isRunning, let endDate = phaseEndDate, endDate <= now {
+            let crossedDay = PinnedTaskSchedule.dateKey(for: sleptAt ?? endDate) != PinnedTaskSchedule.dateKey(for: now)
+            let expiredLongAgo = sleptAt != nil && now.timeIntervalSince(endDate) > 60
+            if crossedDay || expiredLongAgo {
+                refreshDailyCounterIfNeeded()
+                resetCurrentPhase()
+                return
+            }
+        }
+
+        refreshDailyCounterIfNeeded()
+        syncWallClockTick()
+    }
 
     private func syncWallClockTick() {
         guard isRunning, let endDate = phaseEndDate else { return }
@@ -259,7 +318,7 @@ final class PomodoroService: ObservableObject {
     }
 
     private func completeCurrentPhase(playSound: Bool, countFocus: Bool) {
-        pause()
+        stopTimerOnly()
 
         if playSound && UserPreferences.shared.pomodoroSoundEnabled {
             NSSound(named: NSSound.Name("Glass"))?.play()
@@ -326,6 +385,7 @@ final class PomodoroService: ObservableObject {
         if UserPreferences.shared.pomodoroCompletedTodayDate != todayKey {
             UserPreferences.shared.pomodoroCompletedTodayDate = todayKey
             completedFocusToday = 1
+            focusStreakInCycle = 0
         } else {
             completedFocusToday += 1
         }

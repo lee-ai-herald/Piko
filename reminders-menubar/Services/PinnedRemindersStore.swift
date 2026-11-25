@@ -69,6 +69,7 @@ final class PinnedRemindersStore: ObservableObject {
     private var toastDismissWork: DispatchWorkItem?
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
+    private var menuBarCountGeneration = 0
     private var lastObservedTodayKey: String = PinnedTaskSchedule.dateKey(for: Date())
 
     @Published var activeTab: BoardTab = .board
@@ -174,6 +175,13 @@ final class PinnedRemindersStore: ObservableObject {
         refreshTask = Task { [weak self] in
             await self?.refresh()
         }
+    }
+
+    /// Cancels any in-flight `refresh()` started before a local mutation so stale snapshots
+    /// cannot prune newly written schedules during the EventKit notification debounce window.
+    func invalidateInFlightRefresh() {
+        refreshGeneration += 1
+        refreshTask?.cancel()
     }
 
     // MARK: - Synced Lists
@@ -471,6 +479,7 @@ final class PinnedRemindersStore: ObservableObject {
         ) else {
             return false
         }
+        invalidateInFlightRefresh()
         allItems.insert(ReminderItem(for: reminder), at: 0)
         NotificationCenter.default.post(name: .remindersDataShouldUpdate, object: nil)
         return true
@@ -655,7 +664,9 @@ final class PinnedRemindersStore: ObservableObject {
         spanDays: Int,
         syncReminderDueDate: Bool = true
     ) {
-        let normalizedStart = Calendar.current.startOfDay(for: startDate)
+        invalidateInFlightRefresh()
+        let cal = Calendar.current
+        let normalizedStart = cal.startOfDay(for: startDate)
         let clampedSpan = max(1, min(30, spanDays))
 
         var sched = schedules[reminderId] ?? {
@@ -665,7 +676,26 @@ final class PinnedRemindersStore: ObservableObject {
             return PinnedTaskSchedule(reminderId: reminderId)
         }()
 
-        sched.startDateKey = PinnedTaskSchedule.dateKey(for: normalizedStart)
+        let oldStartKey = sched.startDateKey
+        let newStartKey = PinnedTaskSchedule.dateKey(for: normalizedStart)
+        let validKeys = Set((0..<clampedSpan).compactMap { offset -> String? in
+            guard let day = cal.date(byAdding: .day, value: offset, to: normalizedStart) else { return nil }
+            return PinnedTaskSchedule.dateKey(for: day)
+        })
+
+        // Migrate single start-day slot when rescheduling to a new date, and prune out-of-range ghost slots.
+        if !sched.daySlots.isEmpty {
+            var updatedSlots = sched.daySlots.filter { validKeys.contains($0.key) }
+            if updatedSlots.isEmpty,
+               sched.daySlots.count == 1,
+               let oldStartKey,
+               let singleSlot = sched.daySlots[oldStartKey] {
+                updatedSlots[newStartKey] = singleSlot
+            }
+            sched.daySlots = updatedSlots
+        }
+
+        sched.startDateKey = newStartKey
         sched.spanDays = clampedSpan
         schedules[reminderId] = sched
         persistSchedules()
@@ -673,7 +703,24 @@ final class PinnedRemindersStore: ObservableObject {
         if syncReminderDueDate,
            let item = findItem(byId: reminderId),
            let endDate = sched.endDate {
-            RemindersService.shared.updateDeadline(for: item.reminder, date: endDate, withTime: false)
+            let endKey = PinnedTaskSchedule.dateKey(for: endDate)
+            if let endSlot = sched.daySlots[endKey],
+               let datedSlot = cal.date(
+                bySettingHour: endSlot.startMinute / 60,
+                minute: endSlot.startMinute % 60,
+                second: 0,
+                of: endDate
+               ) {
+                RemindersService.shared.updateDeadline(for: item.reminder, date: datedSlot, withTime: true)
+            } else if item.reminder.hasTime, let existingDue = item.reminder.resolvedDueDate {
+                RemindersService.shared.updateDeadline(
+                    for: item.reminder,
+                    date: endDate.withTime(from: existingDue),
+                    withTime: true
+                )
+            } else {
+                RemindersService.shared.updateDeadline(for: item.reminder, date: endDate, withTime: false)
+            }
         }
     }
 
@@ -681,8 +728,9 @@ final class PinnedRemindersStore: ObservableObject {
         unscheduleCompletely(for: reminderId)
     }
 
-    /// Moves a task cleanly back to "待安排": clears both day span, all hourly slots, and Apple Reminders due date.
+    /// Moves a task cleanly back to "待安排": clears day span, all hourly slots, recurrence rules, and Apple Reminders due date.
     func unscheduleCompletely(for reminderId: String) {
+        invalidateInFlightRefresh()
         schedules[reminderId] = PinnedTaskSchedule(
             reminderId: reminderId,
             startDateKey: nil,
@@ -692,6 +740,9 @@ final class PinnedRemindersStore: ObservableObject {
         persistSchedules()
 
         if let item = findItem(byId: reminderId) {
+            if item.reminder.hasRecurrenceRules {
+                item.reminder.removeAllRecurrenceRules()
+            }
             RemindersService.shared.updateDeadline(for: item.reminder, date: nil, withTime: false)
         }
     }
@@ -702,9 +753,12 @@ final class PinnedRemindersStore: ObservableObject {
         for reminderId: String,
         on date: Date? = nil,
         startMinute: Int,
-        durationMinutes: Int? = nil
+        durationMinutes: Int? = nil,
+        syncReminderDueDate: Bool = true
     ) {
-        let targetDate = Calendar.current.startOfDay(for: date ?? selectedDate)
+        invalidateInFlightRefresh()
+        let cal = Calendar.current
+        let targetDate = cal.startOfDay(for: date ?? selectedDate)
         let key = PinnedTaskSchedule.dateKey(for: targetDate)
 
         var sched = schedules[reminderId] ?? {
@@ -715,32 +769,44 @@ final class PinnedRemindersStore: ObservableObject {
         }()
 
         let existingDur = sched.daySlots[key]?.durationMinutes ?? 60
-        sched.daySlots[key] = DayTimeSlot(startMinute: startMinute, durationMinutes: durationMinutes ?? existingDur)
+        let newSlot = DayTimeSlot(startMinute: startMinute, durationMinutes: durationMinutes ?? existingDur)
 
-        // Ensure day-dimension span covers targetDate
+        // Ensure day-dimension span covers targetDate without stretching an unrelated earlier/later task across the gap.
         if sched.startDateKey == nil {
             sched.startDateKey = key
             sched.spanDays = 1
         } else if let start = sched.startDate, let end = sched.endDate {
-            let cal = Calendar.current
-            if targetDate < cal.startOfDay(for: start) {
-                let extra = PinnedTaskSchedule.dayDifference(from: targetDate, to: start)
+            let normStart = cal.startOfDay(for: start)
+            let normEnd = cal.startOfDay(for: end)
+            if targetDate < normStart || targetDate > normEnd {
                 sched.startDateKey = key
-                sched.spanDays = min(30, sched.spanDays + extra)
-            } else if targetDate > cal.startOfDay(for: end) {
-                let newSpan = PinnedTaskSchedule.dayDifference(from: start, to: targetDate) + 1
-                sched.spanDays = min(30, newSpan)
+                sched.spanDays = 1
+                sched.daySlots = [:]
             }
         }
 
+        sched.daySlots[key] = newSlot
         schedules[reminderId] = sched
         persistSchedules()
+
+        if syncReminderDueDate,
+           sched.spanDays == 1,
+           let item = findItem(byId: reminderId) {
+            let slotDate = cal.date(
+                bySettingHour: newSlot.startMinute / 60,
+                minute: newSlot.startMinute % 60,
+                second: 0,
+                of: targetDate
+            ) ?? targetDate
+            RemindersService.shared.updateDeadline(for: item.reminder, date: slotDate, withTime: true)
+        }
     }
 
     func clearTimeSlot(for reminderId: String, on date: Date? = nil) {
+        invalidateInFlightRefresh()
         let key = PinnedTaskSchedule.dateKey(for: date ?? selectedDate)
         var sched = schedules[reminderId] ?? {
-            if let item = allItems.first(where: { $0.id == reminderId }) {
+            if let item = findItem(byId: reminderId) {
                 return effectiveSchedule(for: item)
             }
             return PinnedTaskSchedule(reminderId: reminderId)
@@ -752,11 +818,13 @@ final class PinnedRemindersStore: ObservableObject {
 
     // MARK: - Panel Visibility & Tab Switching
 
-    func showPanel(tab: BoardTab? = nil) {
+    func showPanel(tab: BoardTab? = nil, expandIfCollapsed: Bool = true) {
         if let tab {
             activeTab = tab
         }
-        isCollapsed = false
+        if expandIfCollapsed {
+            isCollapsed = false
+        }
         isPanelVisible = true
         let controller = PinnedPanelController.shared
         if controller.isCornerMiniMode, let tab {
@@ -806,9 +874,10 @@ final class PinnedRemindersStore: ObservableObject {
 
     func launchAndRestore() {
         guard RemindersService.shared.isAuthorized else { return }
+        let savedCollapsed = UserPreferences.shared.isPinnedPanelCollapsed
         Task {
             await refresh()
-            showPanel(tab: .board)
+            showPanel(tab: .board, expandIfCollapsed: !savedCollapsed)
         }
     }
 
@@ -842,11 +911,22 @@ final class PinnedRemindersStore: ObservableObject {
         guard generation == refreshGeneration, !Task.isCancelled else { return }
         guard let incomplete = incompleteResult, let recentCompleted = completedResult else { return }
 
-        let activeItems = incomplete.map { ReminderItem(for: $0) }
+        let childrenByParentId = Dictionary(
+            grouping: incomplete.compactMap { rem -> (String, EKReminder)? in
+                guard let pid = rem.parentId else { return nil }
+                return (pid, rem)
+            },
+            by: \.0
+        ).mapValues { $0.map { ReminderItem(for: $0.1, isChild: true) } }
+
+        let activeItems = incomplete.map { rem in
+            ReminderItem(for: rem, withChildren: childrenByParentId[rem.calendarItemIdentifier] ?? [])
+        }
         let limit = (completedTimeRange == .all) ? 500 : 150
         let doneItems = Array(recentCompleted.prefix(limit)).map { ReminderItem(for: $0) }
         self.allItems = activeItems
         self.completedItems = doneItems
+        PomodoroService.shared.reconcileLinkedTask(with: activeItems)
 
         // Only prune orphaned schedules when we have a complete unfiltered view (not 30-day capped / filtered),
         // preventing accidental schedule erasure during partial fetches or edit races.
@@ -865,6 +945,8 @@ final class PinnedRemindersStore: ObservableObject {
     }
 
     private func updateMenuBarCount() async {
+        menuBarCountGeneration += 1
+        let generation = menuBarCountGeneration
         let count: Int
         switch UserPreferences.shared.menuBarCounterType {
         case .due:
@@ -877,6 +959,7 @@ final class PinnedRemindersStore: ObservableObject {
         case .disabled:
             count = -1
         }
+        guard generation == menuBarCountGeneration else { return }
         AppDelegate.shared?.updateMenuBarCount(to: count)
     }
 

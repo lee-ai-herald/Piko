@@ -80,6 +80,60 @@ private final class BoardDropGeometryCache {
 
 // MARK: - Main Unified 3-Column Floating Workspace
 
+/// Isolated high-frequency drag pointer state so 60–120Hz cross-column dragging only redraws
+/// the tiny floating ghost pill instead of re-evaluating the entire 3-column board & Month calendar.
+@MainActor
+private final class BoardDragOverlayState: ObservableObject {
+    @Published var item: ReminderItem?
+    @Published var pointer: CGPoint = .zero
+    @Published var badge: String?
+
+    func clear() {
+        item = nil
+        badge = nil
+    }
+}
+
+@MainActor
+private struct BoardDragGhostOverlay: View {
+    @ObservedObject var state: BoardDragOverlayState
+
+    var body: some View {
+        if let item = state.item {
+            let color = item.reminder.ekPriority.quadrantColor
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 7, height: 7)
+                Text(item.reminder.title ?? "")
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                if let badge = state.badge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(color))
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(NSColor.windowBackgroundColor).opacity(0.96))
+                    .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(color, lineWidth: 1.2)
+            )
+            .position(x: max(90, state.pointer.x), y: max(24, state.pointer.y))
+            .allowsHitTesting(false)
+        }
+    }
+}
+
 @MainActor
 struct PinnedPanelView: View {
     @ObservedObject private var pinnedStore = PinnedRemindersStore.shared
@@ -94,17 +148,24 @@ struct PinnedPanelView: View {
     @State private var compactColumn: CompactBoardColumn = .timeline
 
     // Cross-column drag state (stationary coordinate space: "tripleBoardRoot")
-    @State private var draggingChipItem: ReminderItem?
-    @State private var dragPointer: CGPoint = .zero
+    @StateObject private var dragOverlay = BoardDragOverlayState()
     @State private var dropGeometry = BoardDropGeometryCache()
     @State private var hoveredDropDayIndex: Int?
     @State private var hoveredDropMonthDateKey: String?
     @State private var hoveredDropMinute: Int?
 
     private let dayRowHeight: CGFloat = 62
-    private let startHour = 7
-    private let endHour = 23
     private let hourHeight: CGFloat = 54
+
+    private var effectiveStartHour: Int {
+        let earliest = pinnedStore.timeSlotItemsForSelectedDate.map { $0.slot.startMinute / 60 }.min() ?? 7
+        return min(7, max(0, earliest))
+    }
+
+    private var effectiveEndHour: Int {
+        let latest = pinnedStore.timeSlotItemsForSelectedDate.map { ($0.slot.endMinute + 59) / 60 }.max() ?? 23
+        return max(23, min(24, latest))
+    }
 
     private var isBoardActive: Bool {
         pinnedStore.activeTab == .board && !panelController.isCornerMiniMode && !pinnedStore.isCollapsed
@@ -126,7 +187,11 @@ struct PinnedPanelView: View {
                     reminder: item.reminder,
                     reminderHasChildren: item.hasChildren
                 )
+                .preferredColorScheme(userPreferences.rmbColorScheme.colorScheme)
             }
+            .onChange(of: pinnedStore.activeTab) { _ in cancelCrossColumnDrag() }
+            .onChange(of: pinnedStore.isCollapsed) { _ in cancelCrossColumnDrag() }
+            .onChange(of: panelController.isCornerMiniMode) { _ in cancelCrossColumnDrag() }
     }
 
     private var fullWorkspaceView: some View {
@@ -189,9 +254,7 @@ struct PinnedPanelView: View {
                     .shadow(color: Color.black.opacity(0.06), radius: 2, x: 0, y: 1)
                     .preferredColorScheme(userPreferences.rmbColorScheme.colorScheme)
 
-                    if let item = draggingChipItem {
-                        dragGhostView(for: item)
-                    }
+                    BoardDragGhostOverlay(state: dragOverlay)
 
                     if !pinnedStore.isCollapsed,
                        pinnedStore.activeTab == .board,
@@ -284,8 +347,8 @@ struct PinnedPanelView: View {
 
                     HourlySlotsColumn(
                         columnWidth: rightWidth,
-                        startHour: startHour,
-                        endHour: endHour,
+                        startHour: effectiveStartHour,
+                        endHour: effectiveEndHour,
                         hourHeight: hourHeight,
                         hoveredDropMinute: hoveredDropMinute,
                         isBoardActive: isBoardActive,
@@ -334,8 +397,8 @@ struct PinnedPanelView: View {
 
                     HourlySlotsColumn(
                         columnWidth: rightPaneWidth,
-                        startHour: startHour,
-                        endHour: endHour,
+                        startHour: effectiveStartHour,
+                        endHour: effectiveEndHour,
                         hourHeight: hourHeight,
                         hoveredDropMinute: hoveredDropMinute,
                         isBoardActive: isBoardActive,
@@ -374,8 +437,8 @@ struct PinnedPanelView: View {
                     case .timeline:
                         HourlySlotsColumn(
                             columnWidth: availWidth,
-                            startHour: startHour,
-                            endHour: endHour,
+                            startHour: effectiveStartHour,
+                            endHour: effectiveEndHour,
                             hourHeight: hourHeight,
                             hoveredDropMinute: hoveredDropMinute,
                             isBoardActive: isBoardActive,
@@ -473,56 +536,91 @@ struct PinnedPanelView: View {
 
     // MARK: - Cross-Column Drag Calculation
 
+    private func cancelCrossColumnDrag() {
+        dragOverlay.clear()
+        if hoveredDropMonthDateKey != nil { hoveredDropMonthDateKey = nil }
+        if hoveredDropDayIndex != nil { hoveredDropDayIndex = nil }
+        if hoveredDropMinute != nil { hoveredDropMinute = nil }
+    }
+
     private func updateCrossColumnDrag(item: ReminderItem, at point: CGPoint) {
-        draggingChipItem = item
-        dragPointer = point
+        dragOverlay.item = item
+        dragOverlay.pointer = point
 
         let inMonthViewport = dropGeometry.monthViewportRect == .zero
             || dropGeometry.monthViewportRect.contains(point)
 
+        let nextMonthKey: String?
+        let nextDayIdx: Int?
+        let nextMinute: Int?
+
         if pinnedStore.calendarScale == .month,
            inMonthViewport,
            let matchedKey = dropGeometry.monthCellFrames.first(where: { $0.value.contains(point) })?.key {
-            hoveredDropMonthDateKey = matchedKey
-            hoveredDropDayIndex = nil
-            hoveredDropMinute = nil
+            nextMonthKey = matchedKey
+            nextDayIdx = nil
+            nextMinute = nil
         } else if pinnedStore.calendarScale == .week && dropGeometry.dayViewportRect.contains(point) {
-            hoveredDropMonthDateKey = nil
-            hoveredDropMinute = nil
+            nextMonthKey = nil
+            nextMinute = nil
             let localY = point.y - dropGeometry.dayCanvasRect.minY - 6
             let idx = Int(floor(localY / dayRowHeight))
-            hoveredDropDayIndex = (0..<7).contains(idx) ? idx : nil
+            nextDayIdx = (0..<7).contains(idx) ? idx : nil
         } else if dropGeometry.timeViewportRect.contains(point) {
-            hoveredDropMonthDateKey = nil
-            hoveredDropDayIndex = nil
+            nextMonthKey = nil
+            nextDayIdx = nil
+            let sHour = effectiveStartHour
+            let eHour = effectiveEndHour
             let localY = point.y - dropGeometry.timeCanvasRect.minY - 8
-            let rawMin = Double(startHour * 60) + (Double(localY) / Double(hourHeight)) * 60.0
+            let rawMin = Double(sHour * 60) + (Double(localY) / Double(hourHeight)) * 60.0
             let snapped = DayTimeSlot.snap(Int(rawMin))
-            hoveredDropMinute = max(startHour * 60, min(endHour * 60 - 15, snapped))
+            nextMinute = max(sHour * 60, min(eHour * 60 - 15, snapped))
         } else {
-            hoveredDropMonthDateKey = nil
-            hoveredDropDayIndex = nil
-            hoveredDropMinute = nil
+            nextMonthKey = nil
+            nextDayIdx = nil
+            nextMinute = nil
+        }
+
+        if hoveredDropMonthDateKey != nextMonthKey { hoveredDropMonthDateKey = nextMonthKey }
+        if hoveredDropDayIndex != nextDayIdx { hoveredDropDayIndex = nextDayIdx }
+        if hoveredDropMinute != nextMinute { hoveredDropMinute = nextMinute }
+
+        let nextBadge: String? = {
+            if let monthKey = nextMonthKey,
+               let date = PinnedTaskSchedule.date(fromKey: monthKey) {
+                return RmbFormatters.monthDay.string(from: date)
+            }
+            if let idx = nextDayIdx, pinnedStore.visibleDays.indices.contains(idx) {
+                return RmbFormatters.monthDay.string(from: pinnedStore.visibleDays[idx])
+            }
+            if let min = nextMinute {
+                return DayTimeSlot.formatMinute(min)
+            }
+            return nil
+        }()
+        if dragOverlay.badge != nextBadge {
+            dragOverlay.badge = nextBadge
         }
     }
 
     private func finishCrossColumnDrag(item: ReminderItem, at point: CGPoint) {
         updateCrossColumnDrag(item: item, at: point)
+        let preservedSpan = max(1, pinnedStore.effectiveSchedule(for: item).spanDays)
 
         if let monthKey = hoveredDropMonthDateKey,
            let targetDay = PinnedTaskSchedule.date(fromKey: monthKey) {
             withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
-                pinnedStore.setDaySpan(for: item.id, startDate: targetDay, spanDays: 1)
+                pinnedStore.setDaySpan(for: item.id, startDate: targetDay, spanDays: preservedSpan)
                 pinnedStore.selectDate(targetDay)
             }
         } else if let dayIdx = hoveredDropDayIndex, pinnedStore.visibleDays.indices.contains(dayIdx) {
             let targetDay = pinnedStore.visibleDays[dayIdx]
             withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
-                pinnedStore.setDaySpan(for: item.id, startDate: targetDay, spanDays: 1)
+                pinnedStore.setDaySpan(for: item.id, startDate: targetDay, spanDays: preservedSpan)
                 pinnedStore.selectDate(targetDay)
             }
         } else if let minute = hoveredDropMinute {
-            let duration = max(15, min(60, endHour * 60 - minute))
+            let duration = max(15, min(60, effectiveEndHour * 60 - minute))
             withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
                 pinnedStore.setTimeSlot(
                     for: item.id,
@@ -533,58 +631,7 @@ struct PinnedPanelView: View {
             }
         }
 
-        draggingChipItem = nil
-        hoveredDropMonthDateKey = nil
-        hoveredDropDayIndex = nil
-        hoveredDropMinute = nil
-    }
-
-    @ViewBuilder
-    private func dragGhostView(for item: ReminderItem) -> some View {
-        let color = item.reminder.ekPriority.quadrantColor
-        let badge: String? = {
-            if let monthKey = hoveredDropMonthDateKey,
-               let date = PinnedTaskSchedule.date(fromKey: monthKey) {
-                return RmbFormatters.monthDay.string(from: date)
-            }
-            if let idx = hoveredDropDayIndex, pinnedStore.visibleDays.indices.contains(idx) {
-                return RmbFormatters.monthDay.string(from: pinnedStore.visibleDays[idx])
-            }
-            if let min = hoveredDropMinute {
-                return DayTimeSlot.formatMinute(min)
-            }
-            return nil
-        }()
-
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(item.reminder.title ?? "")
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-            if let badge {
-                Text(badge)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(color))
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(NSColor.windowBackgroundColor).opacity(0.96))
-                .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(color, lineWidth: 1.2)
-        )
-        .position(x: max(90, dragPointer.x), y: max(24, dragPointer.y))
-        .allowsHitTesting(false)
+        cancelCrossColumnDrag()
     }
 }
 
@@ -600,6 +647,16 @@ private struct TaskPoolColumn: View {
     @ObservedObject private var userPreferences = UserPreferences.shared
     @State private var quickAddText = ""
     @State private var isScheduledExpanded = true
+    @State private var authRefreshTick = 0
+
+    private var isAuthorized: Bool {
+        _ = authRefreshTick
+        return RemindersService.shared.isAuthorized
+    }
+
+    private var isQuickAddDisabled: Bool {
+        !isAuthorized || pinnedStore.allCalendarsExcluded
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -711,15 +768,17 @@ private struct TaskPoolColumn: View {
             HStack(spacing: 5) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 12))
-                    .foregroundColor(pinnedStore.allCalendarsExcluded ? .secondary.opacity(0.45) : .accentColor.opacity(0.85))
+                    .foregroundColor(isQuickAddDisabled ? .secondary.opacity(0.45) : .accentColor.opacity(0.85))
 
                 TextField(
-                    pinnedStore.allCalendarsExcluded ? "已暂停同步，请先开启列表…" : "添加新任务，回车确认…",
+                    !isAuthorized
+                        ? "请先授予提醒事项权限…"
+                        : (pinnedStore.allCalendarsExcluded ? "已暂停同步，请先开启列表…" : "添加新任务，回车确认…"),
                     text: $quickAddText
                 )
                     .textFieldStyle(.plain)
                     .font(.system(size: 11.5))
-                    .disabled(pinnedStore.allCalendarsExcluded)
+                    .disabled(isQuickAddDisabled)
                     .onSubmit {
                         let title = quickAddText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !title.isEmpty else { return }
@@ -737,7 +796,31 @@ private struct TaskPoolColumn: View {
             // Vertical Task List: 待安排 + 已排期
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
-                    if pinnedStore.allCalendarsExcluded {
+                    if !isAuthorized {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("未授予 Apple 提醒事项权限")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(.primary)
+                            Text("授权后即可在规划板中查看、排期并同步你的全部待办任务。")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                            Button("前往授权") {
+                                AppDelegate.shared?.openRemindersPermissionFlow()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.accentColor))
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.primary.opacity(0.035))
+                        )
+                    } else if pinnedStore.allCalendarsExcluded {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("已暂停全部提醒事项列表同步")
                                 .font(.system(size: 11.5, weight: .medium))
@@ -846,8 +929,8 @@ private struct TaskPoolColumn: View {
                             }
                         }
 
-                        // Section 3: 已完成 (Time-filtered, unified calm card, zero-jitter rows)
-                        if !pinnedStore.filteredCompletedItems.isEmpty {
+                        // Section 3: 已完成 (Keep header accessible when range != .all so user can switch to 全部)
+                        if !pinnedStore.filteredCompletedItems.isEmpty || pinnedStore.completedTimeRange != .all {
                             CompletedTasksSection(onTapEdit: onTapEdit)
                         }
                     }
@@ -857,6 +940,12 @@ private struct TaskPoolColumn: View {
             }
         }
         .background(Color.primary.opacity(0.018))
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            authRefreshTick += 1
+            if RemindersService.shared.isAuthorized && pinnedStore.availableCalendars.isEmpty {
+                pinnedStore.requestRefresh()
+            }
+        }
     }
 }
 
@@ -1004,6 +1093,7 @@ private struct TaskPoolRow: View {
         .opacity(isDragging ? 0.4 : 1.0)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+        .onDisappear { isDragging = false }
         .contextMenu {
             Button("编辑任务…") { onTap() }
             Menu("调整优先级象限") {
@@ -1384,7 +1474,7 @@ private struct DayDimensionColumn: View {
                         let laidOut = layoutDaySpans()
 
                         ForEach(laidOut, id: \.item.id) { placed in
-                            let colW = (trackWidth - CGFloat(placed.totalColumns - 1) * 5) / CGFloat(placed.totalColumns)
+                            let colW = max(24, (trackWidth - CGFloat(placed.totalColumns - 1) * 5) / CGFloat(placed.totalColumns))
                             let colX = trackLeft + CGFloat(placed.columnIndex) * (colW + 5)
 
                             DaySpanBlockView(
@@ -1690,6 +1780,17 @@ private struct DaySpanBlockView: View {
         isMoving || isResizingTop || isResizingBottom
     }
 
+    private var isStartClippedBeforeWeek: Bool {
+        guard let start = schedule.startDate else { return false }
+        return PinnedTaskSchedule.dayDifference(from: pinnedStore.weekStartDate, to: start) < 0
+    }
+
+    private var isEndClippedAfterWeek: Bool {
+        guard let start = schedule.startDate else { return false }
+        let rawEnd = PinnedTaskSchedule.dayDifference(from: pinnedStore.weekStartDate, to: start) + schedule.spanDays - 1
+        return rawEnd > 6
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             if isActiveDrag {
@@ -1839,74 +1940,96 @@ private struct DaySpanBlockView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            // Top & Bottom AppKit-backed Resize Edges (generous hit zone, native resizeUpDown cursor, zero gesture conflict)
+            // Top & Bottom AppKit-backed Resize Edges (only on unclipped edges so guide & saved dates match 1:1)
             if !isDone {
                 VStack(spacing: 0) {
-                    CardVerticalResizeEdge(
-                        color: quadrantColor,
-                        isActive: isResizingTop,
-                        isCardHovered: isHovered,
-                        isInteractionActive: isBoardActive,
-                        hitHeight: 11,
-                        pillAlignment: .center,
-                        helpText: "拖动上边缘调整开始日期",
-                        onDragChanged: { dy in
-                            isResizingTop = true
-                            topResizeDeltaY = dy
-                        },
-                        onDragEnded: { dy in
-                            topResizeDeltaY = dy
-                            let delta = topDayDelta
-                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                if let baseStart = schedule.startDate,
-                                   let newStart = Calendar.current.date(byAdding: .day, value: delta, to: baseStart) {
-                                    pinnedStore.setDaySpan(
-                                        for: reminderItem.id,
-                                        startDate: newStart,
-                                        spanDays: max(1, schedule.spanDays - delta)
-                                    )
+                    if !isStartClippedBeforeWeek {
+                        CardVerticalResizeEdge(
+                            color: quadrantColor,
+                            isActive: isResizingTop,
+                            isCardHovered: isHovered,
+                            isInteractionActive: isBoardActive,
+                            hitHeight: 11,
+                            pillAlignment: .center,
+                            helpText: "拖动上边缘调整开始日期",
+                            onDragChanged: { dy in
+                                isResizingTop = true
+                                topResizeDeltaY = dy
+                            },
+                            onDragEnded: { dy in
+                                topResizeDeltaY = dy
+                                let delta = topDayDelta
+                                withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                    if let baseStart = schedule.startDate,
+                                       let newStart = Calendar.current.date(byAdding: .day, value: delta, to: baseStart) {
+                                        pinnedStore.setDaySpan(
+                                            for: reminderItem.id,
+                                            startDate: newStart,
+                                            spanDays: max(1, schedule.spanDays - delta)
+                                        )
+                                    }
+                                    isResizingTop = false
+                                    topResizeDeltaY = 0
                                 }
+                            },
+                            onDragCancelled: {
                                 isResizingTop = false
                                 topResizeDeltaY = 0
                             }
-                        }
-                    )
-                    .padding(.horizontal, 12)
-                    .offset(y: -3)
+                        )
+                        .padding(.horizontal, 12)
+                        .offset(y: -3)
+                    }
 
                     Spacer(minLength: 0)
 
-                    CardVerticalResizeEdge(
-                        color: quadrantColor,
-                        isActive: isResizingBottom,
-                        isCardHovered: isHovered,
-                        isInteractionActive: isBoardActive,
-                        hitHeight: 14,
-                        pillAlignment: .center,
-                        helpText: "拖动下边缘拉长或缩短占用天数",
-                        onDragChanged: { dy in
-                            isResizingBottom = true
-                            bottomResizeDeltaY = dy
-                        },
-                        onDragEnded: { dy in
-                            bottomResizeDeltaY = dy
-                            let delta = bottomDayDelta
-                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
-                                if let baseStart = schedule.startDate {
-                                    pinnedStore.setDaySpan(
-                                        for: reminderItem.id,
-                                        startDate: baseStart,
-                                        spanDays: max(1, schedule.spanDays + delta)
-                                    )
+                    if !isEndClippedAfterWeek {
+                        CardVerticalResizeEdge(
+                            color: quadrantColor,
+                            isActive: isResizingBottom,
+                            isCardHovered: isHovered,
+                            isInteractionActive: isBoardActive,
+                            hitHeight: 14,
+                            pillAlignment: .center,
+                            helpText: "拖动下边缘拉长或缩短占用天数",
+                            onDragChanged: { dy in
+                                isResizingBottom = true
+                                bottomResizeDeltaY = dy
+                            },
+                            onDragEnded: { dy in
+                                bottomResizeDeltaY = dy
+                                let delta = bottomDayDelta
+                                withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                    if let baseStart = schedule.startDate {
+                                        pinnedStore.setDaySpan(
+                                            for: reminderItem.id,
+                                            startDate: baseStart,
+                                            spanDays: max(1, schedule.spanDays + delta)
+                                        )
+                                    }
+                                    isResizingBottom = false
+                                    bottomResizeDeltaY = 0
                                 }
+                            },
+                            onDragCancelled: {
                                 isResizingBottom = false
                                 bottomResizeDeltaY = 0
                             }
-                        }
-                    )
-                    .padding(.horizontal, 6)
-                    .offset(y: 3)
+                        )
+                        .padding(.horizontal, 6)
+                        .offset(y: 3)
+                    }
                 }
+            }
+        }
+        .onChange(of: isBoardActive) { active in
+            if !active {
+                isMoving = false
+                moveDeltaY = 0
+                isResizingTop = false
+                topResizeDeltaY = 0
+                isResizingBottom = false
+                bottomResizeDeltaY = 0
             }
         }
     }
@@ -2122,7 +2245,7 @@ private struct HourlySlotsColumn: View {
                             let laidOut = layoutHourlySlots(pinnedStore.timeSlotItemsForSelectedDate)
 
                             ForEach(laidOut, id: \.item.id) { placed in
-                                let colW = (trackWidth - CGFloat(placed.totalColumns - 1) * 5) / CGFloat(placed.totalColumns)
+                                let colW = max(24, (trackWidth - CGFloat(placed.totalColumns - 1) * 5) / CGFloat(placed.totalColumns))
                                 let colX = trackLeft + CGFloat(placed.columnIndex) * (colW + 5)
 
                                 HourlySlotBlockView(
@@ -2233,16 +2356,21 @@ private struct HourlySlotsColumn: View {
             return lhs.item.id < rhs.item.id
         }
 
+        // Account for visual minimum block height (26pt) so consecutive 15-minute slots sit
+        // side-by-side instead of overlapping visually.
+        let minVisualMinutes = Int(ceil(26.0 / hourHeight * 60.0))
+
         // Partition into connected overlap clusters so transitive overlaps never produce colliding column widths.
         var clusters: [[(item: ReminderItem, slot: DayTimeSlot)]] = []
         var clusterMaxEnd = Int.min
         for entry in sorted {
+            let visualEnd = max(entry.slot.endMinute, entry.slot.startMinute + minVisualMinutes)
             if clusters.isEmpty || entry.slot.startMinute >= clusterMaxEnd {
                 clusters.append([entry])
-                clusterMaxEnd = entry.slot.endMinute
+                clusterMaxEnd = visualEnd
             } else {
                 clusters[clusters.count - 1].append(entry)
-                clusterMaxEnd = max(clusterMaxEnd, entry.slot.endMinute)
+                clusterMaxEnd = max(clusterMaxEnd, visualEnd)
             }
         }
 
@@ -2252,7 +2380,7 @@ private struct HourlySlotsColumn: View {
             var assigned: [(item: ReminderItem, slot: DayTimeSlot, col: Int)] = []
             for entry in cluster {
                 let s = entry.slot.startMinute
-                let e = entry.slot.endMinute
+                let e = max(entry.slot.endMinute, s + minVisualMinutes)
                 var placedCol: Int?
                 for idx in colEnds.indices where colEnds[idx] <= s {
                     placedCol = idx
@@ -2349,8 +2477,9 @@ private struct HourlySlotBlockView: View {
             return max(startHour * 60, min(maxStart, slot.startMinute + delta))
         } else if isResizingTop {
             let delta = Int(((topResizeDeltaY / hourHeight) * 60.0 / 15.0).rounded()) * 15
-            let maxStart = max(startHour * 60, slot.endMinute - 15)
-            return max(startHour * 60, min(maxStart, slot.startMinute + delta))
+            let minStart = max(startHour * 60, slot.endMinute - 480)
+            let maxStart = max(minStart, slot.endMinute - 15)
+            return max(minStart, min(maxStart, slot.startMinute + delta))
         }
         return slot.startMinute
     }
@@ -2361,7 +2490,7 @@ private struct HourlySlotBlockView: View {
             let maxDur = max(15, min(480, endHour * 60 - slot.startMinute))
             return max(15, min(maxDur, slot.durationMinutes + delta))
         } else if isResizingTop {
-            return max(15, slot.endMinute - snappedStartMinute)
+            return max(15, min(480, slot.endMinute - snappedStartMinute))
         }
         return slot.durationMinutes
     }
@@ -2370,8 +2499,10 @@ private struct HourlySlotBlockView: View {
         if isMoving {
             return (baseTopY + moveDeltaY).constrainedTo(min: 0, max: max(0, totalCanvasPx - baseHeight))
         } else if isResizingTop {
-            let maxTop = max(0, baseTopY + baseHeight - minBlockHeight)
-            return (baseTopY + topResizeDeltaY).constrainedTo(min: 0, max: maxTop)
+            let bottomEdge = baseTopY + baseHeight
+            let minTop = max(0, bottomEdge - 8.0 * hourHeight)
+            let maxTop = max(minTop, bottomEdge - minBlockHeight)
+            return (baseTopY + topResizeDeltaY).constrainedTo(min: minTop, max: maxTop)
         }
         return baseTopY
     }
@@ -2588,6 +2719,10 @@ private struct HourlySlotBlockView: View {
                                 isResizingTop = false
                                 topResizeDeltaY = 0
                             }
+                        },
+                        onDragCancelled: {
+                            isResizingTop = false
+                            topResizeDeltaY = 0
                         }
                     )
                     .padding(.horizontal, compact ? 24 : 12)
@@ -2620,11 +2755,25 @@ private struct HourlySlotBlockView: View {
                                 isResizingBottom = false
                                 bottomResizeDeltaY = 0
                             }
+                        },
+                        onDragCancelled: {
+                            isResizingBottom = false
+                            bottomResizeDeltaY = 0
                         }
                     )
                     .padding(.horizontal, 6)
                     .offset(y: 1)
                 }
+            }
+        }
+        .onChange(of: isBoardActive) { active in
+            if !active {
+                isMoving = false
+                moveDeltaY = 0
+                isResizingTop = false
+                topResizeDeltaY = 0
+                isResizingBottom = false
+                bottomResizeDeltaY = 0
             }
         }
     }
@@ -2699,6 +2848,7 @@ private struct CardVerticalResizeEdge: View {
     let helpText: String
     let onDragChanged: (CGFloat) -> Void
     let onDragEnded: (CGFloat) -> Void
+    var onDragCancelled: (() -> Void)? = nil
 
     @State private var isHandleHovered = false
 
@@ -2737,7 +2887,8 @@ private struct CardVerticalResizeEdge: View {
                     isHandleHovered = hovering
                 },
                 onDragChanged: onDragChanged,
-                onDragEnded: onDragEnded
+                onDragEnded: onDragEnded,
+                onDragCancelled: onDragCancelled
             )
         }
         .frame(maxWidth: .infinity)
@@ -2752,12 +2903,14 @@ private struct VerticalResizeMouseCatcher: NSViewRepresentable {
     let onHoverChanged: (Bool) -> Void
     let onDragChanged: (CGFloat) -> Void
     let onDragEnded: (CGFloat) -> Void
+    let onDragCancelled: (() -> Void)?
 
     func makeNSView(context: Context) -> VerticalResizeMouseNSView {
         let view = VerticalResizeMouseNSView()
         view.onHoverChanged = onHoverChanged
         view.onDragChanged = onDragChanged
         view.onDragEnded = onDragEnded
+        view.onDragCancelled = onDragCancelled
         view.setInteractionActive(isInteractionActive)
         return view
     }
@@ -2766,6 +2919,7 @@ private struct VerticalResizeMouseCatcher: NSViewRepresentable {
         nsView.onHoverChanged = onHoverChanged
         nsView.onDragChanged = onDragChanged
         nsView.onDragEnded = onDragEnded
+        nsView.onDragCancelled = onDragCancelled
         nsView.setInteractionActive(isInteractionActive)
     }
 }
@@ -2774,6 +2928,7 @@ private final class VerticalResizeMouseNSView: NSView {
     var onHoverChanged: ((Bool) -> Void)?
     var onDragChanged: ((CGFloat) -> Void)?
     var onDragEnded: ((CGFloat) -> Void)?
+    var onDragCancelled: (() -> Void)?
 
     private var isInteractionActive = true
     private var initialMouseScreenY: CGFloat = 0
@@ -2796,10 +2951,14 @@ private final class VerticalResizeMouseNSView: NSView {
         isInteractionActive = active
         isHidden = shouldHide
         if !active && (isPointerInside || isDragging) {
+            let wasDragging = isDragging
             isDragging = false
             hasMoved = false
             isPointerInside = false
             onHoverChanged?(false)
+            if wasDragging {
+                onDragCancelled?()
+            }
             NSCursor.arrow.set()
         }
         window?.invalidateCursorRects(for: self)
@@ -2808,9 +2967,13 @@ private final class VerticalResizeMouseNSView: NSView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil && (isPointerInside || isDragging) {
+            let wasDragging = isDragging
             isDragging = false
             hasMoved = false
             isPointerInside = false
+            if wasDragging {
+                onDragCancelled?()
+            }
             NSCursor.arrow.set()
         }
     }
@@ -2946,6 +3109,7 @@ private struct CompactDragChip: View {
         .opacity(isDragging ? 0.4 : 1.0)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+        .onDisappear { isDragging = false }
         .onTapGesture {
             if !isDragging { onTap() }
         }

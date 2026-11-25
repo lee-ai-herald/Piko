@@ -11,19 +11,63 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     var createdAt: Date
     var isPinned: Bool
     var sourceApp: String?
+    var imageHash: String?
+
+    /// Precomputed display/search metadata so SwiftUI row rendering & filtering never scan 512KB strings.
+    let previewText: String
+    let characterCount: Int
+    private let searchSample: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, createdAt, isPinned, sourceApp, imageHash
+    }
 
     init(
         id: UUID = UUID(),
         kind: Kind,
         createdAt: Date = Date(),
         isPinned: Bool = false,
-        sourceApp: String? = nil
+        sourceApp: String? = nil,
+        imageHash: String? = nil
     ) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
         self.isPinned = isPinned
         self.sourceApp = sourceApp
+        self.imageHash = imageHash
+        let meta = Self.buildMetadata(kind: kind, sourceApp: sourceApp)
+        self.previewText = meta.preview
+        self.characterCount = meta.charCount
+        self.searchSample = meta.searchSample
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(UUID.self, forKey: .id)
+        let kind = try container.decode(Kind.self, forKey: .kind)
+        let createdAt = try container.decode(Date.self, forKey: .createdAt)
+        let isPinned = try container.decode(Bool.self, forKey: .isPinned)
+        let sourceApp = try container.decodeIfPresent(String.self, forKey: .sourceApp)
+        let imageHash = try container.decodeIfPresent(String.self, forKey: .imageHash)
+        self.init(
+            id: id,
+            kind: kind,
+            createdAt: createdAt,
+            isPinned: isPinned,
+            sourceApp: sourceApp,
+            imageHash: imageHash
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(isPinned, forKey: .isPinned)
+        try container.encodeIfPresent(sourceApp, forKey: .sourceApp)
+        try container.encodeIfPresent(imageHash, forKey: .imageHash)
     }
 
     var textValue: String? {
@@ -33,12 +77,35 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         return nil
     }
 
-    var searchableText: String {
+    func matches(query: String) -> Bool {
+        if searchSample.localizedCaseInsensitiveContains(query) {
+            return true
+        }
+        if let sourceApp, sourceApp.localizedCaseInsensitiveContains(query) {
+            return true
+        }
+        return false
+    }
+
+    private static func buildMetadata(
+        kind: Kind,
+        sourceApp: String?
+    ) -> (preview: String, charCount: Int, searchSample: String) {
         switch kind {
         case .text(let value):
-            return value
+            let head = value.prefix(1_024).trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview: String
+            if head.count > 320 {
+                preview = String(head.prefix(320)) + "…"
+            } else if !head.isEmpty {
+                preview = head
+            } else {
+                preview = String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(320))
+            }
+            let sample = value.utf8.count > 65_536 ? String(value.prefix(32_768)) : value
+            return (preview, value.count, sample)
         case .image(_, let width, let height):
-            return "图片 image \(width)x\(height) \(sourceApp ?? "")"
+            return ("", 0, "图片 image \(width)x\(height) \(sourceApp ?? "")")
         }
     }
 

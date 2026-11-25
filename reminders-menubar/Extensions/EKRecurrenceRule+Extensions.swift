@@ -2,6 +2,7 @@ import EventKit
 
 extension EKRecurrenceRule {
     var hasNoAdditionalConstraints: Bool {
+        recurrenceEnd == nil &&
         daysOfTheWeek == nil &&
         daysOfTheMonth == nil &&
         daysOfTheYear == nil &&

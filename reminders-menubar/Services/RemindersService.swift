@@ -4,16 +4,30 @@ import EventKit
 class RemindersService {
     static let shared = RemindersService()
 
-    private init() {}
-
     private let eventStore = EKEventStore()
+    private var wasAuthorized = false
 
-    var isAuthorized: Bool {
+    private init() {
+        wasAuthorized = Self.currentAuthorizationGranted()
+    }
+
+    private static func currentAuthorizationGranted() -> Bool {
         if #available(macOS 14.0, *) {
             return EKEventStore.authorizationStatus(for: .reminder) == .fullAccess
         } else {
             return EKEventStore.authorizationStatus(for: .reminder) == .authorized
         }
+    }
+
+    var isAuthorized: Bool {
+        let authorized = Self.currentAuthorizationGranted()
+        if authorized && !wasAuthorized {
+            wasAuthorized = true
+            eventStore.reset()
+        } else if !authorized && wasAuthorized {
+            wasAuthorized = false
+        }
+        return authorized
     }
 
     func requestAccess(completion: @escaping (Bool, String?) -> Void) {

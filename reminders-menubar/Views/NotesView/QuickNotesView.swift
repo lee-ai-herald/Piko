@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Full Workspace Quick Notes View (随笔记事)
 
@@ -268,14 +269,15 @@ private struct QuickNoteCardRow: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Spacer(minLength: 4)
-
-                    if isJustCopied {
+                    // Fixed-size trailing slot with opacity-only swap guarantees 0.0px hover jitter.
+                    ZStack(alignment: .trailing) {
                         Text("已复制")
                             .font(.system(size: 9.5, weight: .semibold))
                             .foregroundColor(.green)
-                    } else if isHovered {
+                            .opacity(isJustCopied ? 1 : 0)
+
                         HStack(spacing: 3) {
                             Button {
                                 store.copyNote(note)
@@ -301,8 +303,12 @@ private struct QuickNoteCardRow: View {
                             .buttonStyle(.plain)
                             .help("删除随笔")
                         }
+                        .opacity(!isJustCopied && isHovered ? 1 : 0)
+                        .allowsHitTesting(!isJustCopied && isHovered)
                     }
+                    .frame(width: 40, height: 18, alignment: .trailing)
                 }
+                .frame(height: 18)
 
                 Text(note.previewText)
                     .font(.system(size: 11))
@@ -319,6 +325,16 @@ private struct QuickNoteCardRow: View {
                         Text("· \(note.characterCount) 字")
                             .font(.system(size: 9.5))
                             .foregroundColor(.secondary.opacity(0.75))
+                    }
+
+                    if !note.imageFileNames.isEmpty {
+                        HStack(spacing: 2) {
+                            Image(systemName: "photo")
+                                .font(.system(size: 8.5))
+                            Text("\(note.imageFileNames.count)")
+                                .font(.system(size: 9.5, design: .monospaced))
+                        }
+                        .foregroundColor(.secondary.opacity(0.78))
                     }
                 }
             }
@@ -344,6 +360,7 @@ private struct QuickNoteCardRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
         .onTapGesture(perform: onSelect)
         .onHover { isHovered = $0 }
+        .transaction { $0.animation = nil }
         .contextMenu {
             Button(note.isPinned ? "取消置顶" : "置顶便签") {
                 store.togglePin(id: note.id)
@@ -370,9 +387,13 @@ private struct QuickNoteCardRow: View {
             }
             Button("添加到规划板") {
                 let text = note.fullCopyableText
-                if !text.isEmpty {
-                    PinnedRemindersStore.shared.quickCreateFromSelection(text, splitByLine: false)
+                guard !text.isEmpty else { return }
+                guard RemindersService.shared.isAuthorized else {
+                    AppDelegate.shared?.openRemindersPermissionFlow()
+                    return
                 }
+                guard !PinnedRemindersStore.shared.allCalendarsExcluded else { return }
+                PinnedRemindersStore.shared.quickCreateFromSelection(text, splitByLine: false)
             }
             Divider()
             Button("删除随笔", role: .destructive) {
@@ -400,6 +421,7 @@ private struct NoteEditorPane: View {
     @State private var bodyText: String
     @State private var selectedText = ""
     @State private var sentToBoardMessage: String?
+    @State private var sentToBoardIsError = false
     @State private var toastWorkItem: DispatchWorkItem?
 
     private var selectedNonEmptyLineCount: Int {
@@ -456,22 +478,39 @@ private struct NoteEditorPane: View {
             PlaceholderNoteTextView(
                 text: $bodyText,
                 placeholder: userPreferences.isNoteMarkdownEnabled
-                    ? "支持 Markdown 所写即所见：# 标题、- [ ] 待办、**加粗**、==标黄==、`代码`"
-                    : "随便记点什么… 选中文字可加粗、标黄或加入规划板",
+                    ? "支持粘贴图片与 Markdown：# 标题、- [ ] 待办、**加粗**、==标黄==、`代码`"
+                    : "随便记点什么… 支持 ⌘V 粘贴图片、选中文字加粗或加入规划板",
                 fontSize: isMiniMode ? 12.5 : 13,
                 horizontalInset: isMiniMode ? 8 : 12,
                 verticalInset: 4,
                 lineSpacing: 3.5,
                 isRichTextEnabled: true,
                 isLiveMarkdownEnabled: userPreferences.isNoteMarkdownEnabled,
+                allowImageAttachments: true,
                 isActive: isActiveTab,
                 noteRevision: liveNote.revision,
                 editorId: editorId,
                 lastEditOriginId: store.lastEditOriginByNoteId[note.id],
                 initialRTFData: liveNote.rtfData,
+                initialImageFileNames: liveNote.imageFileNames,
                 formattingController: formattingController,
-                onRichTextChanged: { plain, rtf in
-                    store.updateNote(id: note.id, content: plain, rtfData: .some(rtf), originEditorId: editorId)
+                imageLoader: { fileName in
+                    QuickNotesStore.shared.image(for: fileName)
+                },
+                imageURLResolver: { fileName in
+                    QuickNotesStore.shared.imageURL(for: fileName)
+                },
+                onStoreImage: { image, rawPNG in
+                    QuickNotesStore.shared.storeImage(image, rawPNGData: rawPNG)
+                },
+                onRichContentChanged: { plain, rtf, images in
+                    store.updateNote(
+                        id: note.id,
+                        content: plain,
+                        rtfData: .some(rtf),
+                        imageFileNames: images,
+                        originEditorId: editorId
+                    )
                 },
                 onSelectionChanged: { selected in
                     selectedText = selected
@@ -767,6 +806,18 @@ private struct NoteEditorPane: View {
                     formattingController.apply(.toggleHighlight)
                 }
 
+                // Insert Image from Disk (in addition to direct ⌘V paste & drag-drop)
+                NoteFormatToggleButton(
+                    symbol: "photo",
+                    width: btnW,
+                    isActive: false,
+                    activeFill: Color.primary.opacity(0.10),
+                    activeForeground: .primary,
+                    helpText: "插入图片（也支持直接 ⌘V 粘贴或拖入）"
+                ) {
+                    pickAndInsertImages()
+                }
+
                 // WYSIWYG Block / Heading / Checklist Insert Menu
                 if userPreferences.isNoteMarkdownEnabled {
                     Menu {
@@ -831,24 +882,26 @@ private struct NoteEditorPane: View {
             // Right: Contextual Toast / Selection-to-Board / Subtle Word Count & Save Time
             if let toast = sentToBoardMessage {
                 HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
+                    Image(systemName: sentToBoardIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                         .font(.system(size: 10.5))
-                        .foregroundColor(.green)
-                    Text(isMiniMode ? "已加入" : toast)
+                        .foregroundColor(sentToBoardIsError ? .orange : .green)
+                    Text(sentToBoardIsError ? toast : (isMiniMode ? "已加入" : toast))
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.green)
+                        .foregroundColor(sentToBoardIsError ? .orange : .green)
                         .lineLimit(1)
 
-                    Button("查看") {
-                        if PinnedPanelController.shared.isCornerMiniMode {
-                            PinnedPanelController.shared.switchCornerMiniTab(.board)
-                        } else {
-                            PinnedRemindersStore.shared.activeTab = .board
+                    if !sentToBoardIsError {
+                        Button("查看") {
+                            if PinnedPanelController.shared.isCornerMiniMode {
+                                PinnedPanelController.shared.switchCornerMiniTab(.board)
+                            } else {
+                                PinnedRemindersStore.shared.activeTab = .board
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.accentColor)
                     }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.accentColor)
                 }
             } else if !selectedText.isEmpty {
                 HStack(spacing: 4) {
@@ -889,9 +942,17 @@ private struct NoteEditorPane: View {
                     }
                 }
             } else {
+                let charCount = titleText.count + bodyText.count
+                let imgCount = liveNote.imageFileNames.count
+                let countSummary: String = {
+                    if imgCount > 0 {
+                        return charCount > 0 ? "\(charCount) 字 · \(imgCount) 图" : "\(imgCount) 张图片"
+                    }
+                    return "\(charCount) 字"
+                }()
                 Text(isMiniMode
-                     ? "\(titleText.count + bodyText.count) 字"
-                     : "\(titleText.count + bodyText.count) 字 · \(liveNote.relativeTimeText)")
+                     ? countSummary
+                     : "\(countSummary) · \(liveNote.relativeTimeText)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary.opacity(0.75))
                     .lineLimit(1)
@@ -903,25 +964,47 @@ private struct NoteEditorPane: View {
         .background(liveNote.colorTag.accentColor.opacity(0.055))
     }
 
+    private func pickAndInsertImages() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.level = .modalPanel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { response in
+            guard response == .OK else { return }
+            for url in panel.urls {
+                guard let data = try? Data(contentsOf: url),
+                      data.count <= 32 * 1024 * 1024,
+                      let image = NSImage(data: data) else { continue }
+                let rawPNG = url.pathExtension.lowercased() == "png" ? data : nil
+                formattingController.apply(.insertImage(image, rawPNG))
+            }
+        }
+    }
+
     private func sendTextToBoard(_ text: String, splitByLine: Bool) {
         guard RemindersService.shared.isAuthorized else {
-            showToast("请先授予提醒事项权限")
+            showToast(isMiniMode ? "需先授权提醒" : "请先授予提醒事项权限", isError: true)
             return
         }
         guard !PinnedRemindersStore.shared.allCalendarsExcluded else {
-            showToast("请先在设置中开启至少一个同步列表")
+            showToast(isMiniMode ? "未开启同步列表" : "请先在设置中开启至少一个同步列表", isError: true)
             return
         }
         let count = PinnedRemindersStore.shared.quickCreateFromSelection(text, splitByLine: splitByLine)
         guard count > 0 else { return }
-        showToast(count == 1 ? "已添加到规划板" : "已添加 \(count) 条任务")
+        showToast(count == 1 ? "已添加到规划板" : "已添加 \(count) 条任务", isError: false)
     }
 
-    private func showToast(_ message: String) {
+    private func showToast(_ message: String, isError: Bool) {
         sentToBoardMessage = message
+        sentToBoardIsError = isError
         toastWorkItem?.cancel()
         let work = DispatchWorkItem {
             sentToBoardMessage = nil
+            sentToBoardIsError = false
         }
         toastWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)

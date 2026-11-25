@@ -10,9 +10,9 @@ struct ClipboardHistoryView: View {
 
     private var filteredItems: [ClipboardItem] {
         let base = showPinnedOnly ? store.sortedItems.filter(\.isPinned) : store.sortedItems
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return base }
-        return base.filter { $0.searchableText.lowercased().contains(query) }
+        return base.filter { $0.matches(query: query) }
     }
 
     var body: some View {
@@ -29,7 +29,8 @@ struct ClipboardHistoryView: View {
                         ForEach(filteredItems) { item in
                             ClipboardItemRow(
                                 item: item,
-                                isJustCopied: store.lastCopiedItemId == item.id
+                                isJustCopied: store.lastCopiedItemId == item.id,
+                                thumbnailRevision: store.thumbnailRevision
                             )
                         }
                     }
@@ -132,6 +133,7 @@ struct ClipboardHistoryView: View {
 private struct ClipboardItemRow: View {
     let item: ClipboardItem
     let isJustCopied: Bool
+    let thumbnailRevision: Int
 
     @State private var isHovered = false
 
@@ -162,8 +164,8 @@ private struct ClipboardItemRow: View {
                             .lineLimit(1)
                     }
 
-                    if case .text(let value) = item.kind {
-                        Text("· \(value.count) 字")
+                    if case .text = item.kind {
+                        Text("· \(item.characterCount) 字")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary.opacity(0.8))
                     }
@@ -173,17 +175,21 @@ private struct ClipboardItemRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if isJustCopied {
+            // Fixed-width trailing slot with opacity-only swap prevents text reflow & height jitter on hover.
+            ZStack(alignment: .topTrailing) {
                 HStack(spacing: 3) {
                     Image(systemName: "checkmark")
                     Text("已复制")
                 }
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(.green)
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.green.opacity(0.14)))
-            } else if isHovered {
+                .opacity(isJustCopied ? 1 : 0)
+
                 HStack(spacing: 4) {
                     Button {
                         store.togglePin(item)
@@ -192,6 +198,7 @@ private struct ClipboardItemRow: View {
                             .font(.system(size: 11))
                             .foregroundColor(item.isPinned ? .orange : .secondary)
                             .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(item.isPinned ? "取消收藏" : "收藏置顶（清空时不删除）")
@@ -203,11 +210,15 @@ private struct ClipboardItemRow: View {
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.secondary)
                             .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("删除此条")
                 }
+                .opacity(!isJustCopied && isHovered ? 1 : 0)
+                .allowsHitTesting(!isJustCopied && isHovered)
             }
+            .frame(width: 58, height: 22, alignment: .topTrailing)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -231,19 +242,21 @@ private struct ClipboardItemRow: View {
             store.copyItem(item)
         }
         .onHover { isHovered = $0 }
+        .transaction { $0.animation = nil }
     }
 
     @ViewBuilder
     private var contentPreview: some View {
         switch item.kind {
-        case .text(let value):
-            Text(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        case .text:
+            Text(item.previewText)
                 .font(.system(size: 12))
                 .foregroundColor(.primary)
                 .lineLimit(3)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .image(let fileName, let width, let height):
+            let _ = thumbnailRevision
             HStack(spacing: 8) {
                 if let nsImage = store.thumbnail(for: fileName) {
                     Image(nsImage: nsImage)
@@ -251,6 +264,10 @@ private struct ClipboardItemRow: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: 120, maxHeight: 54)
                         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                } else {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 54, height: 36)
                 }
                 Text("图片 (\(width)×\(height))")
                     .font(.system(size: 11))

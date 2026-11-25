@@ -98,6 +98,7 @@ struct CornerMiniWindowView: View {
                 reminder: item.reminder,
                 reminderHasChildren: item.hasChildren
             )
+            .preferredColorScheme(userPreferences.rmbColorScheme.colorScheme)
         }
     }
 
@@ -289,6 +290,16 @@ private struct MiniTaskChecklistView: View {
     @State private var quickAddText = ""
     @State private var isScheduledExpanded = true
     @State private var isSearchVisible = false
+    @State private var authRefreshTick = 0
+
+    private var isAuthorized: Bool {
+        _ = authRefreshTick
+        return RemindersService.shared.isAuthorized
+    }
+
+    private var isQuickAddDisabled: Bool {
+        !isAuthorized || pinnedStore.allCalendarsExcluded
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -401,15 +412,17 @@ private struct MiniTaskChecklistView: View {
             HStack(spacing: 6) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 12))
-                    .foregroundColor(pinnedStore.allCalendarsExcluded ? .secondary.opacity(0.45) : .accentColor.opacity(0.85))
+                    .foregroundColor(isQuickAddDisabled ? .secondary.opacity(0.45) : .accentColor.opacity(0.85))
 
                 TextField(
-                    pinnedStore.allCalendarsExcluded ? "已暂停同步，请先开启列表…" : "添加新任务，回车确认…",
+                    !isAuthorized
+                        ? "请先授予提醒事项权限…"
+                        : (pinnedStore.allCalendarsExcluded ? "已暂停同步，请先开启列表…" : "添加新任务，回车确认…"),
                     text: $quickAddText
                 )
                     .textFieldStyle(.plain)
                     .font(.system(size: 11.5))
-                    .disabled(pinnedStore.allCalendarsExcluded)
+                    .disabled(isQuickAddDisabled)
                     .onSubmit {
                         let title = quickAddText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !title.isEmpty else { return }
@@ -426,7 +439,29 @@ private struct MiniTaskChecklistView: View {
 
             // Task Checklist ScrollView (+ Floating Undo Toast)
             ZStack(alignment: .bottom) {
-                if pinnedStore.allCalendarsExcluded {
+                if !isAuthorized {
+                    VStack(spacing: 8) {
+                        Spacer()
+                        Image(systemName: "lock.shield")
+                            .font(.system(size: 24))
+                            .foregroundColor(.secondary.opacity(0.6))
+                        Text("未授予提醒事项权限")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundColor(.primary)
+                        Button("前往授权") {
+                            AppDelegate.shared?.openRemindersPermissionFlow()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.accentColor))
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                } else if pinnedStore.allCalendarsExcluded {
                     VStack(spacing: 8) {
                         Spacer()
                         Image(systemName: "line.3.horizontal.decrease.circle")
@@ -472,6 +507,15 @@ private struct MiniTaskChecklistView: View {
                         Text(pinnedStore.searchText.isEmpty ? "在上方输入框输入即可快速添加" : "换个关键词或筛选条件试试")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
+                        if pinnedStore.completedTimeRange != .all {
+                            Button("查看全部历史已完成") {
+                                pinnedStore.completedTimeRange = .all
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(.accentColor)
+                            .padding(.top, 2)
+                        }
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -537,7 +581,7 @@ private struct MiniTaskChecklistView: View {
                                 }
                             }
 
-                            if !pinnedStore.filteredCompletedItems.isEmpty {
+                            if !pinnedStore.filteredCompletedItems.isEmpty || pinnedStore.completedTimeRange != .all {
                                 CompletedTasksSection(onTapEdit: onTapEdit)
                             }
                         }
@@ -552,6 +596,12 @@ private struct MiniTaskChecklistView: View {
                         .padding(.bottom, 10)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            authRefreshTick += 1
+            if RemindersService.shared.isAuthorized && pinnedStore.availableCalendars.isEmpty {
+                pinnedStore.requestRefresh()
             }
         }
     }
@@ -672,6 +722,8 @@ private struct MiniTaskChecklistRow: View {
                     if let badge = scheduleBadge {
                         Text(badge)
                             .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .lineLimit(1)
+                            .fixedSize()
                             .foregroundColor(quadrantColor)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1.5)
@@ -699,7 +751,7 @@ private struct MiniTaskChecklistRow: View {
                     .help("切换到番茄钟专注此任务")
                 }
             }
-            .frame(width: 36, height: 20, alignment: .trailing)
+            .frame(width: 44, height: 20, alignment: .trailing)
         }
         .padding(.horizontal, 8.5)
         .padding(.vertical, 7)

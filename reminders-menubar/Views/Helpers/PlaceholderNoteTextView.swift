@@ -1,5 +1,108 @@
 import Cocoa
 import SwiftUI
+import UniformTypeIdentifiers
+
+// MARK: - Inline Note Image Attachment (Responsive Rounded Thumbnail, Disk-Backed)
+
+private func computeResponsiveImageBounds(
+    naturalSize: NSSize,
+    lineFragmentWidth: CGFloat
+) -> NSRect {
+    let safeW = naturalSize.width > 0 ? naturalSize.width : 240
+    let safeH = naturalSize.height > 0 ? naturalSize.height : 160
+    let aspect = safeH / max(1, safeW)
+    let maxW = max(80, lineFragmentWidth - 14)
+    let maxH: CGFloat = lineFragmentWidth < 320 ? 220 : 340
+    var targetW = min(safeW, maxW)
+    var targetH = targetW * aspect
+    if targetH > maxH {
+        targetH = maxH
+        targetW = max(48, targetH / max(0.01, aspect))
+    }
+    return NSRect(x: 0, y: -4, width: floor(targetW), height: floor(targetH))
+}
+
+final class NoteImageAttachmentCell: NSTextAttachmentCell {
+    let fileName: String
+    private let naturalSize: NSSize
+
+    init(image: NSImage, fileName: String) {
+        self.fileName = fileName
+        self.naturalSize = (image.size.width > 0 && image.size.height > 0)
+            ? image.size
+            : NSSize(width: 240, height: 160)
+        super.init(imageCell: image)
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func cellSize() -> NSSize {
+        computeResponsiveImageBounds(naturalSize: naturalSize, lineFragmentWidth: 320).size
+    }
+
+    override func cellFrame(
+        for textContainer: NSTextContainer,
+        proposedLineFragment lineFrag: NSRect,
+        glyphPosition position: NSPoint,
+        characterIndex charIndex: Int
+    ) -> NSRect {
+        computeResponsiveImageBounds(naturalSize: naturalSize, lineFragmentWidth: lineFrag.width)
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
+        guard let image = self.image else { return }
+        let insetFrame = cellFrame.insetBy(dx: 0.5, dy: 2)
+        guard insetFrame.width > 2, insetFrame.height > 2 else { return }
+
+        NSGraphicsContext.saveGraphicsState()
+        let clipPath = NSBezierPath(roundedRect: insetFrame, xRadius: 7, yRadius: 7)
+        clipPath.addClip()
+        image.draw(
+            in: insetFrame,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1.0,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.high]
+        )
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
+        let borderPath = NSBezierPath(roundedRect: insetFrame, xRadius: 7, yRadius: 7)
+        borderPath.lineWidth = 0.75
+        borderPath.stroke()
+    }
+}
+
+final class NoteImageTextAttachment: NSTextAttachment {
+    let fileName: String
+    let originalImage: NSImage
+
+    init(fileName: String, image: NSImage) {
+        self.fileName = fileName
+        self.originalImage = image
+        super.init(data: nil, ofType: nil)
+        self.image = image
+        self.attachmentCell = NoteImageAttachmentCell(image: image, fileName: fileName)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func attachmentBounds(
+        for textContainer: NSTextContainer?,
+        proposedLineFragment lineFrag: NSRect,
+        glyphPosition position: CGPoint,
+        characterIndex charIndex: Int
+    ) -> NSRect {
+        computeResponsiveImageBounds(naturalSize: originalImage.size, lineFragmentWidth: lineFrag.width)
+    }
+}
 
 // MARK: - Rich Text Formatting Model & Controller
 
@@ -25,6 +128,7 @@ enum NoteFormatAction {
     case toggleStrikethrough
     case clearFormatting
     case insertMarkdown(MarkdownSnippet)
+    case insertImage(NSImage, Data?)
 }
 
 @MainActor
@@ -58,13 +162,19 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
     var lineSpacing: CGFloat = 3
     var isRichTextEnabled: Bool = false
     var isLiveMarkdownEnabled: Bool = false
+    var allowImageAttachments: Bool = false
     var isActive: Bool = true
     var noteRevision: Int = 0
     var editorId: UUID = UUID()
     var lastEditOriginId: UUID? = nil
     var initialRTFData: Data? = nil
+    var initialImageFileNames: [String] = []
     var formattingController: NoteFormattingController? = nil
+    var imageLoader: ((String) -> NSImage?)? = nil
+    var imageURLResolver: ((String) -> URL?)? = nil
+    var onStoreImage: ((NSImage, Data?) -> (fileName: String, image: NSImage)?)? = nil
     var onRichTextChanged: ((String, Data?) -> Void)? = nil
+    var onRichContentChanged: ((String, Data?, [String]) -> Void)? = nil
     var onSelectionChanged: ((String) -> Void)? = nil
     /// Callback `(selectedText, splitByLine)` triggered from right-click context menu on selected text.
     var onSendSelectionToBoard: ((String, Bool) -> Void)? = nil
@@ -91,7 +201,11 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         textView.backgroundColor = .clear
         textView.isRichText = isRichTextEnabled
         textView.isLiveMarkdownEnabled = isRichTextEnabled && isLiveMarkdownEnabled
+        textView.allowImageAttachments = isRichTextEnabled && allowImageAttachments
         textView.importsGraphics = false
+        if isRichTextEnabled && allowImageAttachments {
+            textView.registerForDraggedTypes([.fileURL, .png, .tiff])
+        }
         textView.allowsUndo = true
         textView.isEditable = true
         textView.isSelectable = true
@@ -109,15 +223,21 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
         applyBaseConfiguration(to: textView)
         textView.onSendSelectionToBoard = onSendSelectionToBoard
-        textView.onFormatChanged = { [weak coordinator = context.coordinator] in
-            coordinator?.syncRichTextAndFormat(from: textView)
-        }
-        textView.onTypingFormatChanged = { [weak coordinator = context.coordinator] in
+        textView.onStoreImage = onStoreImage
+        textView.imageURLResolver = imageURLResolver
+        textView.onTypingFormatChanged = { [weak coordinator = context.coordinator, weak textView] in
+            guard let textView else { return }
             coordinator?.syncFormatState(from: textView)
         }
 
         if isRichTextEnabled, let rtf = initialRTFData,
-           let normalized = Self.normalizedAttributedString(fromRTF: rtf, fontSize: fontSize, lineSpacing: lineSpacing) {
+           let normalized = Self.normalizedAttributedString(
+               fromRTF: rtf,
+               imageFileNames: initialImageFileNames,
+               fontSize: fontSize,
+               lineSpacing: lineSpacing,
+               imageLoader: imageLoader
+           ) {
             textView.textStorage?.setAttributedString(normalized)
         } else {
             let baseAttrs = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
@@ -134,6 +254,18 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         scrollView.isHidden = !isActive
         textView.isTabActive = isActive
         return scrollView
+    }
+
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        guard let textView = scrollView.documentView as? PlaceholderNSTextView else { return }
+        textView.delegate = nil
+        textView.onTypingFormatChanged = nil
+        textView.onSendSelectionToBoard = nil
+        textView.onStoreImage = nil
+        textView.imageURLResolver = nil
+        if coordinator.parent.formattingController?.textView === textView {
+            coordinator.parent.formattingController?.textView = nil
+        }
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -154,8 +286,11 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         textView.baseFontSize = fontSize
         textView.baseLineSpacing = lineSpacing
         textView.isLiveMarkdownEnabled = isRichTextEnabled && isLiveMarkdownEnabled
+        textView.allowImageAttachments = isRichTextEnabled && allowImageAttachments
         applyBaseConfiguration(to: textView)
         textView.onSendSelectionToBoard = onSendSelectionToBoard
+        textView.onStoreImage = onStoreImage
+        textView.imageURLResolver = imageURLResolver
         formattingController?.textView = textView
 
         // Never overwrite while user is composing with IME (e.g. Chinese Pinyin)
@@ -180,8 +315,10 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             if let rtf = initialRTFData,
                let normalized = Self.normalizedAttributedString(
                    fromRTF: rtf,
+                   imageFileNames: initialImageFileNames,
                    fontSize: fontSize,
-                   lineSpacing: lineSpacing
+                   lineSpacing: lineSpacing,
+                   imageLoader: imageLoader
                ) {
                 textView.textStorage?.setAttributedString(normalized)
             } else {
@@ -317,11 +454,11 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
     }
 
     /// Normalizes line endings and removes control/attachment sentinel characters that mutate or disappear
-    /// during RTF round-trips (`\r\n`, `\r`, `\u{2029}`, `\0`, `\u{FFFC}`), keeping plain text and RTF identical.
+    /// during RTF round-trips (`\r\n`, `\r`, `\u{2029}`, `\0`, `\u{FFFC}`, `\u{E000}`), keeping plain text and RTF identical.
     static func sanitizedPlainTextForInsertion(_ raw: String) -> String {
         // Inspect Unicode scalars (not Swift Characters, where `\r\n` is a single grapheme cluster != `\r`).
         let needsSanitization = raw.unicodeScalars.contains { scalar in
-            scalar == "\r" || scalar == "\u{2029}" || scalar == "\0" || scalar == "\u{FFFC}"
+            scalar == "\r" || scalar == "\u{2029}" || scalar == "\0" || scalar == "\u{FFFC}" || scalar == "\u{E000}"
         }
         guard needsSanitization else { return raw }
 
@@ -341,7 +478,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             previousWasCR = false
             if scalar == "\u{2029}" {
                 output.unicodeScalars.append("\n")
-            } else if scalar == "\0" || scalar == "\u{FFFC}" {
+            } else if scalar == "\0" || scalar == "\u{FFFC}" || scalar == "\u{E000}" {
                 continue
             } else {
                 output.unicodeScalars.append(scalar)
@@ -352,8 +489,10 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
     static func normalizedAttributedString(
         fromRTF data: Data,
+        imageFileNames: [String] = [],
         fontSize: CGFloat,
-        lineSpacing: CGFloat
+        lineSpacing: CGFloat,
+        imageLoader: ((String) -> NSImage?)? = nil
     ) -> NSAttributedString? {
         guard let decoded = NSAttributedString(rtf: data, documentAttributes: nil) else {
             return nil
@@ -413,44 +552,15 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
         result.beginEditing()
         decoded.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
-            if range.location >= cachedLineEnd {
-                let lineRange = nsStr.lineRange(for: NSRange(location: range.location, length: 0))
-                cachedLineEnd = NSMaxRange(lineRange)
-                let prefixLen = min(4, lineRange.length)
-                let linePrefix = prefixLen > 0
-                    ? nsStr.substring(with: NSRange(location: lineRange.location, length: prefixLen))
-                    : ""
-                isDividerLine = linePrefix.hasPrefix("────")
-                isQuoteLine = linePrefix.hasPrefix("▎ ")
-                isCheckedLine = linePrefix.hasPrefix("☑ ")
-            }
-
             let summary = (attrs[.font] as? NSFont).map(fontSummary(for:))
-            let isMono = summary?.isMono ?? false
+            let bgColor = attrs[.backgroundColor] as? NSColor
+            let isYellow = NoteMarkdownConverter.isYellowHighlightColor(bgColor)
+            let isInlineCode = (summary?.isMono ?? false) || NoteMarkdownConverter.isInlineCodeBackgroundColor(bgColor)
             let isBold = summary?.isBold ?? false
             let obliq = (attrs[.obliqueness] as? NSNumber)?.doubleValue ?? 0
             let isItalic = (summary?.isItalic ?? false) || obliq > 0.05
             let underlineRaw = (attrs[.underlineStyle] as? NSNumber)?.intValue ?? 0
             let strikeRaw = (attrs[.strikethroughStyle] as? NSNumber)?.intValue ?? 0
-            let bgColor = attrs[.backgroundColor] as? NSColor
-            let isYellow = NoteMarkdownConverter.isYellowHighlightColor(bgColor)
-
-            // Only inspect chunk string for short runs or checked lines (avoids copying huge text runs).
-            let trimmedChunk: String = {
-                guard range.length <= 16 else { return "" }
-                return nsStr.substring(with: range).trimmingCharacters(in: .whitespaces)
-            }()
-            let isCheckboxGlyph = trimmedChunk == "☐" || trimmedChunk == "☑"
-
-            // Preserve heading sizes cleanly while keeping checkbox glyphs distinct from H3
-            let resolvedSize: CGFloat = {
-                if isCheckboxGlyph { return fontSize + 0.8 }
-                guard let pt = summary?.pointSize else { return fontSize }
-                if pt >= fontSize + 4.5 { return fontSize + 5.5 }
-                if pt >= fontSize + 2.2 { return fontSize + 3.0 }
-                if pt >= fontSize + 1.2 { return fontSize + 1.5 }
-                return fontSize
-            }()
 
             let paragraphStyle: NSParagraphStyle
             if let oldPara = attrs[.paragraphStyle] as? NSParagraphStyle,
@@ -469,57 +579,139 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
                 paragraphStyle = defaultParagraphStyle
             }
 
-            let resolvedFG: NSColor = {
-                if trimmedChunk == "▎" || trimmedChunk == "☑" {
-                    return .controlAccentColor
+            // Split multi-line runs along line boundaries so line-level styling (dividers, quotes,
+            // checked items) never bleeds onto subsequent paragraphs.
+            let runEnd = NSMaxRange(range)
+            var segStart = range.location
+            while segStart < runEnd {
+                if segStart >= cachedLineEnd {
+                    let lineRange = nsStr.lineRange(for: NSRange(location: segStart, length: 0))
+                    cachedLineEnd = NSMaxRange(lineRange)
+                    let prefixLen = min(4, lineRange.length)
+                    let linePrefix = prefixLen > 0
+                        ? nsStr.substring(with: NSRange(location: lineRange.location, length: prefixLen))
+                        : ""
+                    isDividerLine = linePrefix.hasPrefix("────")
+                    isQuoteLine = linePrefix.hasPrefix("▎ ")
+                    isCheckedLine = linePrefix.hasPrefix("☑ ")
                 }
-                if trimmedChunk == "☐" {
-                    return .secondaryLabelColor
-                }
-                if isDividerLine {
-                    return .tertiaryLabelColor
-                }
-                if isQuoteLine {
-                    return .secondaryLabelColor
-                }
-                if isCheckedLine {
-                    let chunkHasCheckedGlyph = range.length <= 16
-                        ? trimmedChunk.contains("☑")
-                        : nsStr.range(of: "☑", options: [], range: range).location != NSNotFound
-                    if !chunkHasCheckedGlyph {
+
+                let segEnd = min(runEnd, cachedLineEnd)
+                let segRange = NSRange(location: segStart, length: segEnd - segStart)
+
+                let trimmedChunk: String = {
+                    guard segRange.length <= 16 else { return "" }
+                    return nsStr.substring(with: segRange).trimmingCharacters(in: .whitespaces)
+                }()
+                let isCheckboxGlyph = trimmedChunk == "☐" || trimmedChunk == "☑"
+
+                // Preserve heading sizes across Mini (12.5pt) and Full (13.0pt) windows while keeping
+                // checkbox glyphs (13.3 / 13.8pt) strictly distinct from H3 (14.0 / 14.5pt).
+                let resolvedSize: CGFloat = {
+                    if isCheckboxGlyph { return fontSize + 0.8 }
+                    guard let pt = summary?.pointSize else { return fontSize }
+                    if pt >= 17.5 || pt >= fontSize + 4.5 { return fontSize + 5.5 }
+                    if pt >= 15.0 || pt >= fontSize + 2.2 { return fontSize + 3.0 }
+                    if pt >= 13.9 || pt >= fontSize + 1.2 { return fontSize + 1.5 }
+                    return fontSize
+                }()
+
+                let resolvedFG: NSColor = {
+                    if trimmedChunk == "▎" || trimmedChunk == "☑" {
+                        return .controlAccentColor
+                    }
+                    if trimmedChunk == "☐" {
                         return .secondaryLabelColor
                     }
+                    if isDividerLine {
+                        return .tertiaryLabelColor
+                    }
+                    if isQuoteLine {
+                        return .secondaryLabelColor
+                    }
+                    if isCheckedLine {
+                        let chunkHasCheckedGlyph = segRange.length <= 16
+                            ? trimmedChunk.contains("☑")
+                            : nsStr.range(of: "☑", options: [], range: segRange).location != NSNotFound
+                        if !chunkHasCheckedGlyph {
+                            return .secondaryLabelColor
+                        }
+                    }
+                    return .labelColor
+                }()
+
+                var normalizedAttrs: [NSAttributedString.Key: Any] = [
+                    .foregroundColor: resolvedFG,
+                    .paragraphStyle: paragraphStyle
+                ]
+
+                if isInlineCode {
+                    normalizedAttrs[.font] = monoFont
+                    normalizedAttrs[.backgroundColor] = inlineCodeBackgroundColor
+                } else {
+                    normalizedAttrs[.font] = cachedFont(size: resolvedSize, isBold: isBold, isItalic: isItalic)
+                    if isItalic {
+                        normalizedAttrs[.obliqueness] = NSNumber(value: Double(chineseItalicObliqueness))
+                    }
+                    if isYellow {
+                        normalizedAttrs[.backgroundColor] = highlightYellowColor
+                    }
                 }
-                return .labelColor
-            }()
 
-            var normalizedAttrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: resolvedFG,
-                .paragraphStyle: paragraphStyle
-            ]
-
-            if isMono {
-                normalizedAttrs[.font] = monoFont
-                normalizedAttrs[.backgroundColor] = inlineCodeBackgroundColor
-            } else {
-                normalizedAttrs[.font] = cachedFont(size: resolvedSize, isBold: isBold, isItalic: isItalic)
-                if isItalic {
-                    normalizedAttrs[.obliqueness] = NSNumber(value: Double(chineseItalicObliqueness))
+                if underlineRaw != 0 {
+                    normalizedAttrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
                 }
-                if isYellow {
-                    normalizedAttrs[.backgroundColor] = highlightYellowColor
+                if strikeRaw != 0 {
+                    normalizedAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
                 }
-            }
 
-            if underlineRaw != 0 {
-                normalizedAttrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                result.setAttributes(normalizedAttrs, range: segRange)
+                segStart = segEnd
             }
-            if strikeRaw != 0 {
-                normalizedAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-            }
-
-            result.setAttributes(normalizedAttrs, range: range)
         }
+
+        // Restore disk-backed inline image attachments at each 1-char UTF-16 sentinel (`U+E000`).
+        if !imageFileNames.isEmpty {
+            let sentinelChar = NoteMarkdownConverter.imageSentinelUTF16
+            let currentNS = result.string as NSString
+            let len = currentNS.length
+            var sentinelLocations: [Int] = []
+            for idx in 0..<len where currentNS.character(at: idx) == sentinelChar {
+                sentinelLocations.append(idx)
+            }
+
+            let imagePara = NSMutableParagraphStyle()
+            imagePara.lineSpacing = lineSpacing
+            imagePara.paragraphSpacingBefore = 3
+            imagePara.paragraphSpacing = 4
+
+            // Replace in reverse order so out-of-range fallback strings cannot shift earlier indices.
+            for (imgIdx, loc) in sentinelLocations.enumerated().reversed() {
+                let targetRange = NSRange(location: loc, length: 1)
+                if imgIdx < imageFileNames.count {
+                    let fileName = imageFileNames[imgIdx]
+                    if let loadedImage = imageLoader?(fileName) {
+                        let attachment = NoteImageTextAttachment(fileName: fileName, image: loadedImage)
+                        let attr = NSMutableAttributedString(attachment: attachment)
+                        attr.addAttribute(.paragraphStyle, value: imagePara, range: NSRange(location: 0, length: attr.length))
+                        result.replaceCharacters(in: targetRange, with: attr)
+                    } else {
+                        let missing = NSAttributedString(
+                            string: "[图片文件已移除]",
+                            attributes: [
+                                .font: NSFont.systemFont(ofSize: max(11, fontSize - 1)),
+                                .foregroundColor: NSColor.tertiaryLabelColor,
+                                .paragraphStyle: imagePara
+                            ]
+                        )
+                        result.replaceCharacters(in: targetRange, with: missing)
+                    }
+                } else {
+                    result.deleteCharacters(in: targetRange)
+                }
+            }
+        }
+
         result.endEditing()
         return result
     }
@@ -550,14 +742,23 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         }
 
         func syncRichTextAndFormat(from textView: PlaceholderNSTextView) {
-            let plain = textView.string
-            lastSyncedPlainText = plain
-            if parent.text != plain {
-                parent.text = plain
-            }
             if parent.isRichTextEnabled {
-                let rtf = textView.exportRTFData()
-                parent.onRichTextChanged?(plain, rtf)
+                let exported = textView.exportRichContent()
+                lastSyncedPlainText = exported.plainText
+                if parent.text != exported.plainText {
+                    parent.text = exported.plainText
+                }
+                if let onRichContentChanged = parent.onRichContentChanged {
+                    onRichContentChanged(exported.plainText, exported.rtfData, exported.imageFileNames)
+                } else {
+                    parent.onRichTextChanged?(exported.plainText, exported.rtfData)
+                }
+            } else {
+                let plain = textView.string
+                lastSyncedPlainText = plain
+                if parent.text != plain {
+                    parent.text = plain
+                }
             }
             syncFormatState(from: textView)
         }
@@ -591,13 +792,18 @@ private extension NSTextView {
         guard range.length > 0 else { return "" }
         let nsStr = string as NSString
         guard NSMaxRange(range) <= nsStr.length else { return "" }
-        return nsStr.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        return nsStr.substring(with: range)
+            .replacingOccurrences(of: "\u{FFFC}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
 /// Ensures the underlying `NSTextView` is always at least as tall as the visible scroll viewport
-/// so clicking anywhere in an empty note immediately focuses the cursor.
+/// so clicking anywhere in an empty note immediately focuses the cursor, and re-layouts inline
+/// images smoothly whenever the editor width changes.
 private final class AutoSizingNoteScrollView: NSScrollView {
+    private var lastViewportWidth: CGFloat = 0
+
     override func layout() {
         super.layout()
         guard let textView = documentView as? NSTextView else { return }
@@ -608,6 +814,16 @@ private final class AutoSizingNoteScrollView: NSScrollView {
                 var frame = textView.frame
                 frame.size.height = minHeight
                 textView.frame = frame
+            }
+        }
+        let currentWidth = contentView.bounds.width
+        if abs(currentWidth - lastViewportWidth) > 1.0 {
+            lastViewportWidth = currentWidth
+            if let storage = textView.textStorage, storage.containsAttachments, storage.length > 0 {
+                textView.layoutManager?.invalidateLayout(
+                    forCharacterRange: NSRange(location: 0, length: storage.length),
+                    actualCharacterRange: nil
+                )
             }
         }
     }
@@ -624,10 +840,15 @@ final class PlaceholderNSTextView: NSTextView {
     var baseFontSize: CGFloat = 13
     var baseLineSpacing: CGFloat = 3
     var isLiveMarkdownEnabled: Bool = false
+    var allowImageAttachments: Bool = false
     var isTabActive: Bool = true
     var onSendSelectionToBoard: ((String, Bool) -> Void)?
-    var onFormatChanged: (() -> Void)?
+    var onStoreImage: ((NSImage, Data?) -> (fileName: String, image: NSImage)?)?
+    var imageURLResolver: ((String) -> URL?)?
     var onTypingFormatChanged: (() -> Void)?
+
+    private var contextMenuImageAttachment: (attachment: NoteImageTextAttachment, charIndex: Int)?
+    private static let maxPastedImageBytes = 32 * 1024 * 1024
 
     private enum InlineRule {
         case bold
@@ -717,14 +938,17 @@ final class PlaceholderNSTextView: NSTextView {
                 baseFontSize: baseFontSize,
                 lineSpacing: baseLineSpacing
             )
-            if shouldChangeText(in: prefixRange, replacementString: "") {
-                storage.replaceCharacters(in: prefixRange, with: "")
-                // Also apply heading style to any remaining text on this line
-                let updatedLineRange = (string as NSString).lineRange(for: NSRange(location: lineRange.location, length: 0))
-                let trimmedLen = ((string as NSString).substring(with: updatedLineRange).trimmingCharacters(in: .newlines) as NSString).length
-                if trimmedLen > 0 {
-                    storage.setAttributes(hAttrs, range: NSRange(location: updatedLineRange.location, length: trimmedLen))
-                }
+            let nsText = string as NSString
+            let trimmedLineLen = (nsText.substring(with: lineRange).trimmingCharacters(in: .newlines) as NSString).length
+            let targetLineRange = NSRange(location: lineRange.location, length: max(prefixRange.length, trimmedLineLen))
+            let remainingRange = NSRange(
+                location: caretLocation,
+                length: max(0, NSMaxRange(targetLineRange) - caretLocation)
+            )
+            let remainingStr = remainingRange.length > 0 ? nsText.substring(with: remainingRange) : ""
+            let replacement = NSAttributedString(string: remainingStr, attributes: hAttrs)
+            if shouldChangeText(in: targetLineRange, replacementString: remainingStr) {
+                storage.replaceCharacters(in: targetLineRange, with: replacement)
                 didChangeText()
                 setSelectedRange(NSRange(location: lineRange.location, length: 0))
                 typingAttributes = hAttrs
@@ -732,8 +956,10 @@ final class PlaceholderNSTextView: NSTextView {
             }
         }
 
-        // Unchecked Checkbox: "- [ ] ", "* [ ] ", "[] "
-        if lineBeforeCaret == "- [ ] " || lineBeforeCaret == "* [ ] " || lineBeforeCaret == "[] " {
+        // Unchecked Checkbox: "- [ ] ", "* [ ] ", "[] ", "• [ ] ", "• [] "
+        // Note: typing "- " converts immediately to "• ", so typing "- [ ] " arrives here as "• [ ] ".
+        if lineBeforeCaret == "- [ ] " || lineBeforeCaret == "* [ ] " || lineBeforeCaret == "[] "
+            || lineBeforeCaret == "• [ ] " || lineBeforeCaret == "• [] " {
             let replacement = makeCheckboxPrefix(isChecked: false)
             if shouldChangeText(in: prefixRange, replacementString: replacement.string) {
                 storage.replaceCharacters(in: prefixRange, with: replacement)
@@ -745,8 +971,10 @@ final class PlaceholderNSTextView: NSTextView {
             }
         }
 
-        // Checked Checkbox: "- [x] ", "- [X] "
-        if lineBeforeCaret == "- [x] " || lineBeforeCaret == "- [X] " {
+        // Checked Checkbox: "- [x] ", "- [X] ", "* [x] ", "* [X] ", "• [x] ", "• [X] "
+        if lineBeforeCaret == "- [x] " || lineBeforeCaret == "- [X] "
+            || lineBeforeCaret == "* [x] " || lineBeforeCaret == "* [X] "
+            || lineBeforeCaret == "• [x] " || lineBeforeCaret == "• [X] " {
             let replacement = makeCheckboxPrefix(isChecked: true)
             if shouldChangeText(in: prefixRange, replacementString: replacement.string) {
                 storage.replaceCharacters(in: prefixRange, with: replacement)
@@ -779,15 +1007,27 @@ final class PlaceholderNSTextView: NSTextView {
         // Quote Block: "> "
         if lineBeforeCaret == "> " {
             let quote = makeQuotePrefix()
-            if shouldChangeText(in: prefixRange, replacementString: quote.string) {
-                storage.replaceCharacters(in: prefixRange, with: quote)
+            let qAttrs = PlaceholderNoteTextView.quoteAttributes(
+                baseFontSize: baseFontSize,
+                lineSpacing: baseLineSpacing
+            )
+            let nsText = string as NSString
+            let trimmedLineLen = (nsText.substring(with: lineRange).trimmingCharacters(in: .newlines) as NSString).length
+            let targetLineRange = NSRange(location: lineRange.location, length: max(prefixRange.length, trimmedLineLen))
+            let remainingRange = NSRange(
+                location: caretLocation,
+                length: max(0, NSMaxRange(targetLineRange) - caretLocation)
+            )
+            let replacement = NSMutableAttributedString(attributedString: quote)
+            if remainingRange.length > 0 {
+                replacement.append(NSAttributedString(string: nsText.substring(with: remainingRange), attributes: qAttrs))
+            }
+            if shouldChangeText(in: targetLineRange, replacementString: replacement.string) {
+                storage.replaceCharacters(in: targetLineRange, with: replacement)
                 didChangeText()
                 let nextLoc = lineRange.location + quote.length
                 setSelectedRange(NSRange(location: nextLoc, length: 0))
-                typingAttributes = PlaceholderNoteTextView.quoteAttributes(
-                    baseFontSize: baseFontSize,
-                    lineSpacing: baseLineSpacing
-                )
+                typingAttributes = qAttrs
                 return true
             }
         }
@@ -892,10 +1132,52 @@ final class PlaceholderNSTextView: NSTextView {
     // MARK: - Clickable Checkboxes (`☐` <-> `☑`) Right Inside Editor!
 
     override func mouseDown(with event: NSEvent) {
+        if isRichText, allowImageAttachments, event.clickCount == 2,
+           let hit = imageAttachment(at: event) {
+            previewImageAttachment(hit.attachment)
+            return
+        }
         if isRichText, tryToggleCheckbox(at: event) {
             return
         }
         super.mouseDown(with: event)
+    }
+
+    private func imageAttachment(at event: NSEvent) -> (attachment: NoteImageTextAttachment, charIndex: Int)? {
+        guard let storage = textStorage,
+              let layoutManager = layoutManager,
+              let textContainer = textContainer,
+              storage.containsAttachments,
+              storage.length > 0 else {
+            return nil
+        }
+
+        let pointInView = convert(event.locationInWindow, from: nil)
+        let pointInContainer = NSPoint(
+            x: pointInView.x - textContainerOrigin.x,
+            y: pointInView.y - textContainerOrigin.y
+        )
+        var fraction: CGFloat = 0
+        let charIndex = layoutManager.characterIndex(
+            for: pointInContainer,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: &fraction
+        )
+        guard charIndex < storage.length,
+              let attachment = storage.attribute(.attachment, at: charIndex, effectiveRange: nil) as? NoteImageTextAttachment else {
+            return nil
+        }
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return nil }
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        guard glyphRect.insetBy(dx: -4, dy: -4).contains(pointInContainer) else { return nil }
+        return (attachment, charIndex)
+    }
+
+    private func previewImageAttachment(_ attachment: NoteImageTextAttachment) {
+        if let url = imageURLResolver?(attachment.fileName), FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func tryToggleCheckbox(at event: NSEvent) -> Bool {
@@ -1086,19 +1368,21 @@ final class PlaceholderNSTextView: NSTextView {
     private func formatState(from attrs: [NSAttributedString.Key: Any]) -> NoteFormatState {
         let font = attrs[.font] as? NSFont
         let traits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
-        let isMono = font?.fontDescriptor.symbolicTraits.contains(.monoSpace) ?? false
+        let bgColor = attrs[.backgroundColor] as? NSColor
+        let isInlineCode = (font?.fontDescriptor.symbolicTraits.contains(.monoSpace) ?? false)
+            || NoteMarkdownConverter.isInlineCodeBackgroundColor(bgColor)
         let isBold = traits.contains(.boldFontMask)
         let obliq = (attrs[.obliqueness] as? NSNumber)?.doubleValue ?? 0
         let isItalic = traits.contains(.italicFontMask) || obliq > 0.05
         let isUnderlined = ((attrs[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0
         let isStrikethrough = ((attrs[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0
-        let isHighlighted = NoteMarkdownConverter.isYellowHighlightColor(attrs[.backgroundColor] as? NSColor)
+        let isHighlighted = NoteMarkdownConverter.isYellowHighlightColor(bgColor)
 
         let headingLevel: Int = {
             guard let pt = font?.pointSize else { return 0 }
-            if pt >= baseFontSize + 4.5 { return 1 }
-            if pt >= baseFontSize + 2.2 { return 2 }
-            if pt >= baseFontSize + 1.2 { return 3 }
+            if pt >= 17.5 || pt >= baseFontSize + 4.5 { return 1 }
+            if pt >= 15.0 || pt >= baseFontSize + 2.2 { return 2 }
+            if pt >= 13.9 || pt >= baseFontSize + 1.2 { return 3 }
             return 0
         }()
 
@@ -1108,7 +1392,7 @@ final class PlaceholderNSTextView: NSTextView {
             isHighlighted: isHighlighted,
             isUnderlined: isUnderlined,
             isStrikethrough: isStrikethrough,
-            isInlineCode: isMono,
+            isInlineCode: isInlineCode,
             headingLevel: headingLevel
         )
     }
@@ -1118,6 +1402,11 @@ final class PlaceholderNSTextView: NSTextView {
 
         if case .insertMarkdown(let snippet) = action {
             applyWYSIWYGSnippet(snippet)
+            return
+        }
+
+        if case .insertImage(let image, let rawPNG) = action {
+            insertImages([(image, rawPNG)])
             return
         }
 
@@ -1176,7 +1465,7 @@ final class PlaceholderNSTextView: NSTextView {
                 } else {
                     attrs[.backgroundColor] = PlaceholderNoteTextView.highlightYellowColor
                 }
-            case .clearFormatting, .insertMarkdown:
+            case .clearFormatting, .insertMarkdown, .insertImage:
                 break
             }
             attrs[.foregroundColor] = NSColor.labelColor
@@ -1194,7 +1483,7 @@ final class PlaceholderNSTextView: NSTextView {
         case .toggleUnderline: enable = !current.isUnderlined
         case .toggleStrikethrough: enable = !current.isStrikethrough
         case .toggleHighlight: enable = !current.isHighlighted
-        case .clearFormatting, .insertMarkdown: enable = false
+        case .clearFormatting, .insertMarkdown, .insertImage: enable = false
         }
 
         guard shouldChangeText(in: range, replacementString: nil) else { return }
@@ -1259,7 +1548,7 @@ final class PlaceholderNSTextView: NSTextView {
             let clean = PlaceholderNoteTextView.baseAttributes(fontSize: baseFontSize, lineSpacing: baseLineSpacing)
             storage.setAttributes(clean, range: range)
 
-        case .insertMarkdown:
+        case .insertMarkdown, .insertImage:
             break
         }
         storage.endEditing()
@@ -1326,13 +1615,14 @@ final class PlaceholderNSTextView: NSTextView {
 
         case .quote:
             let prefix = makeQuotePrefix()
-            let insertRange = NSRange(location: lineRange.location, length: 0)
+            let targetLineRange = NSRange(location: lineRange.location, length: lineContentLen)
             let qAttrs = PlaceholderNoteTextView.quoteAttributes(baseFontSize: baseFontSize, lineSpacing: baseLineSpacing)
-            if shouldChangeText(in: insertRange, replacementString: prefix.string) {
-                storage.insert(prefix, at: lineRange.location)
-                if lineContentLen > 0 {
-                    storage.setAttributes(qAttrs, range: NSRange(location: lineRange.location + prefix.length, length: lineContentLen))
-                }
+            let replacement = NSMutableAttributedString(attributedString: prefix)
+            if lineContentLen > 0 {
+                replacement.append(NSAttributedString(string: nsText.substring(with: targetLineRange), attributes: qAttrs))
+            }
+            if shouldChangeText(in: targetLineRange, replacementString: replacement.string) {
+                storage.replaceCharacters(in: targetLineRange, with: replacement)
                 didChangeText()
                 setSelectedRange(NSRange(location: sel.location + prefix.length, length: sel.length))
                 typingAttributes = qAttrs
@@ -1344,16 +1634,27 @@ final class PlaceholderNSTextView: NSTextView {
                 baseFontSize: baseFontSize,
                 lineSpacing: baseLineSpacing
             )
+            let isCurrentlyCode = currentFormatState().isInlineCode
             if sel.length > 0 {
                 if shouldChangeText(in: sel, replacementString: nil) {
-                    storage.setAttributes(codeAttrs, range: sel)
+                    storage.beginEditing()
+                    storage.enumerateAttributes(in: sel, options: []) { attrs, subRange, _ in
+                        var updated = isCurrentlyCode ? clean : codeAttrs
+                        if let para = attrs[.paragraphStyle] {
+                            updated[.paragraphStyle] = para
+                        }
+                        if isCurrentlyCode, let fg = attrs[.foregroundColor] {
+                            updated[.foregroundColor] = fg
+                        }
+                        storage.setAttributes(updated, range: subRange)
+                    }
+                    storage.endEditing()
                     didChangeText()
                     typingAttributes = clean
                     onTypingFormatChanged?()
                 }
             } else {
-                let current = currentFormatState()
-                typingAttributes = current.isInlineCode ? clean : codeAttrs
+                typingAttributes = isCurrentlyCode ? clean : codeAttrs
                 onTypingFormatChanged?()
             }
 
@@ -1382,6 +1683,43 @@ final class PlaceholderNSTextView: NSTextView {
             from: NSRange(location: 0, length: storage.length),
             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
         )
+    }
+
+    /// Exports plain text (without attachment chars), compact RTF (with `U+E000` sentinels instead of binary images),
+    /// and the ordered list of inline image filenames.
+    func exportRichContent() -> (plainText: String, rtfData: Data?, imageFileNames: [String]) {
+        guard isRichText, let storage = textStorage, storage.length > 0 else {
+            return (string, nil, [])
+        }
+        if !storage.containsAttachments {
+            return (storage.string, exportRTFData(), [])
+        }
+
+        let copy = NSMutableAttributedString(attributedString: storage)
+        let fullRange = NSRange(location: 0, length: copy.length)
+        let baseAttrs = PlaceholderNoteTextView.baseAttributes(fontSize: baseFontSize, lineSpacing: baseLineSpacing)
+        var attachments: [(range: NSRange, fileName: String)] = []
+
+        copy.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
+            if let imgAttachment = value as? NoteImageTextAttachment {
+                attachments.append((range, imgAttachment.fileName))
+            }
+        }
+
+        let fileNames = attachments.map(\.fileName)
+        for item in attachments.reversed() {
+            copy.replaceCharacters(
+                in: item.range,
+                with: NSAttributedString(string: NoteMarkdownConverter.imageSentinel, attributes: baseAttrs)
+            )
+        }
+
+        let rtf = try? copy.data(
+            from: NSRange(location: 0, length: copy.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        let plainText = storage.string.replacingOccurrences(of: "\u{FFFC}", with: "")
+        return (plainText, rtf, fileNames)
     }
 
     // MARK: - Smart Newline & Backspace
@@ -1423,9 +1761,10 @@ final class PlaceholderNSTextView: NSTextView {
             let nsText = string as NSString
             let lineRange = nsText.lineRange(for: NSRange(location: sel.location, length: 0))
             let lineBeforeCaret = nsText.substring(with: NSRange(location: lineRange.location, length: sel.location - lineRange.location))
+            let fullLineContent = nsText.substring(with: lineRange).trimmingCharacters(in: .newlines)
 
             // Convert "---" + Enter into visual divider when live Markdown is enabled
-            if isLiveMarkdownEnabled && (lineBeforeCaret == "---" || lineBeforeCaret == "***") {
+            if isLiveMarkdownEnabled && (fullLineContent == "---" || fullLineContent == "***") && lineBeforeCaret == fullLineContent {
                 let target = NSRange(location: lineRange.location, length: sel.location - lineRange.location)
                 let divider = makeDividerAttributedString(includeTrailingNewline: true)
                 if shouldChangeText(in: target, replacementString: divider.string) {
@@ -1442,9 +1781,9 @@ final class PlaceholderNSTextView: NSTextView {
 
             // Checklist continuation (`☐ ` / `☑ `)
             if lineBeforeCaret.hasPrefix("☐ ") || lineBeforeCaret.hasPrefix("☑ ") {
-                let remainder = String(lineBeforeCaret.dropFirst(2))
-                if remainder.trimmingCharacters(in: .whitespaces).isEmpty {
-                    let removeRange = NSRange(location: lineRange.location, length: sel.location - lineRange.location)
+                let fullRemainder = String(fullLineContent.dropFirst(2))
+                if fullRemainder.trimmingCharacters(in: .whitespaces).isEmpty {
+                    let removeRange = NSRange(location: lineRange.location, length: (fullLineContent as NSString).length)
                     if shouldChangeText(in: removeRange, replacementString: "") {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
@@ -1468,9 +1807,9 @@ final class PlaceholderNSTextView: NSTextView {
 
             // Quote exit on empty `▎ `
             if lineBeforeCaret.hasPrefix("▎ ") {
-                let remainder = String(lineBeforeCaret.dropFirst(2))
-                if remainder.trimmingCharacters(in: .whitespaces).isEmpty {
-                    let removeRange = NSRange(location: lineRange.location, length: sel.location - lineRange.location)
+                let fullRemainder = String(fullLineContent.dropFirst(2))
+                if fullRemainder.trimmingCharacters(in: .whitespaces).isEmpty {
+                    let removeRange = NSRange(location: lineRange.location, length: (fullLineContent as NSString).length)
                     if shouldChangeText(in: removeRange, replacementString: "") {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
@@ -1484,9 +1823,9 @@ final class PlaceholderNSTextView: NSTextView {
             // Bullet list continuation (`• ` / `- ` / `* ` / `- [ ] `)
             let listPrefixes = ["- [ ] ", "• ", "- ", "* "]
             if let matchedPrefix = listPrefixes.first(where: { lineBeforeCaret.hasPrefix($0) }) {
-                let remainder = String(lineBeforeCaret.dropFirst(matchedPrefix.count))
-                if remainder.trimmingCharacters(in: .whitespaces).isEmpty {
-                    let removeRange = NSRange(location: lineRange.location, length: sel.location - lineRange.location)
+                let fullRemainder = String(fullLineContent.dropFirst(matchedPrefix.count))
+                if fullRemainder.trimmingCharacters(in: .whitespaces).isEmpty {
+                    let removeRange = NSRange(location: lineRange.location, length: (fullLineContent as NSString).length)
                     if shouldChangeText(in: removeRange, replacementString: "") {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
@@ -1517,9 +1856,10 @@ final class PlaceholderNSTextView: NSTextView {
                 let nsLine = lineBeforeCaret as NSString
                 let numStr = nsLine.substring(with: match.range(at: 1))
                 let prefixLen = match.range.length
-                let remainder = nsLine.substring(from: prefixLen)
-                if remainder.trimmingCharacters(in: .whitespaces).isEmpty {
-                    let removeRange = NSRange(location: lineRange.location, length: sel.location - lineRange.location)
+                let nsFullLine = fullLineContent as NSString
+                let fullRemainder = prefixLen <= nsFullLine.length ? nsFullLine.substring(from: prefixLen) : ""
+                if fullRemainder.trimmingCharacters(in: .whitespaces).isEmpty {
+                    let removeRange = NSRange(location: lineRange.location, length: nsFullLine.length)
                     if shouldChangeText(in: removeRange, replacementString: "") {
                         textStorage?.replaceCharacters(in: removeRange, with: "")
                         didChangeText()
@@ -1527,7 +1867,7 @@ final class PlaceholderNSTextView: NSTextView {
                         onTypingFormatChanged?()
                         return
                     }
-                } else if let num = Int(numStr) {
+                } else if let num = Int(numStr), num < Int.max {
                     let nextPrefix = "\(num + 1). "
                     super.insertNewline(sender)
                     typingAttributes = cleanAttrs
@@ -1554,15 +1894,37 @@ final class PlaceholderNSTextView: NSTextView {
 
     // MARK: - Keyboard Shortcuts & Clean Paste
 
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        var types = super.readablePasteboardTypes
+        if isRichText && allowImageAttachments {
+            for extra in [NSPasteboard.PasteboardType.png, .tiff, .fileURL, NSPasteboard.PasteboardType("public.jpeg")] where !types.contains(extra) {
+                types.append(extra)
+            }
+        }
+        return types
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)),
+           isEditable, isRichText, allowImageAttachments,
+           hasPasteableImages(in: NSPasteboard.general) {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard isRichText, isTabActive, !isHiddenOrHasHiddenAncestor, window?.firstResponder === self else {
             return super.performKeyEquivalent(with: event)
         }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let key = event.charactersIgnoringModifiers?.lowercased()
 
         if flags == .command {
             switch key {
+            case "v":
+                paste(nil)
+                return true
             case "b":
                 applyFormatAction(.toggleBold)
                 return true
@@ -1589,16 +1951,216 @@ final class PlaceholderNSTextView: NSTextView {
             default:
                 break
             }
+        } else if flags == [.command, .shift, .option], key == "v" {
+            pasteAsPlainText(nil)
+            return true
         }
         return super.performKeyEquivalent(with: event)
     }
 
     override func paste(_ sender: Any?) {
+        if isRichText, allowImageAttachments, tryPasteImages(from: NSPasteboard.general) {
+            return
+        }
         pasteSanitizedPlainText()
     }
 
     override func pasteAsPlainText(_ sender: Any?) {
         pasteSanitizedPlainText()
+    }
+
+    override func copy(_ sender: Any?) {
+        if isRichText, allowImageAttachments, let storage = textStorage {
+            let sel = selectedRange()
+            if sel.length > 0, NSMaxRange(sel) <= storage.length {
+                let selectedText = (storage.string as NSString)
+                    .substring(with: sel)
+                    .replacingOccurrences(of: "\u{FFFC}", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if selectedText.isEmpty {
+                    var found: [NoteImageTextAttachment] = []
+                    storage.enumerateAttribute(.attachment, in: sel, options: []) { value, _, _ in
+                        if let img = value as? NoteImageTextAttachment {
+                            found.append(img)
+                        }
+                    }
+                    if found.count == 1 {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.writeObjects([found[0].originalImage])
+                        return
+                    }
+                }
+            }
+        }
+        super.copy(sender)
+    }
+
+    // MARK: - Image Paste & Drag-Drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if isRichText, allowImageAttachments, hasPasteableImages(in: sender.draggingPasteboard) {
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if isRichText, allowImageAttachments, hasPasteableImages(in: sender.draggingPasteboard) {
+            return .copy
+        }
+        return super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if isRichText, allowImageAttachments, tryPasteImages(from: sender.draggingPasteboard) {
+            return true
+        }
+        return super.performDragOperation(sender)
+    }
+
+    private static let jpegPasteboardType = NSPasteboard.PasteboardType("public.jpeg")
+
+    private func hasPasteableImages(in pasteboard: NSPasteboard) -> Bool {
+        if !extractImageFileURLs(from: pasteboard).isEmpty {
+            return true
+        }
+        let types = Set(pasteboard.types ?? [])
+        return types.contains(.png)
+            || types.contains(.tiff)
+            || types.contains(Self.jpegPasteboardType)
+            || NSImage.canInit(with: pasteboard)
+    }
+
+    private func extractImageFileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        guard let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL], !urls.isEmpty else {
+            return []
+        }
+        return urls.filter { url in
+            if let values = try? url.resourceValues(forKeys: [.contentTypeKey, .isRegularFileKey]),
+               values.isRegularFile == true,
+               let type = values.contentType {
+                return type.conforms(to: .image)
+            }
+            if let extType = UTType(filenameExtension: url.pathExtension) {
+                return extType.conforms(to: .image)
+            }
+            return false
+        }
+    }
+
+    @discardableResult
+    func tryPasteImages(from pasteboard: NSPasteboard) -> Bool {
+        guard isEditable, isRichText, allowImageAttachments else { return false }
+
+        // 1. Finder-copied or dragged image file URL(s) (also catches WeChat/messaging apps that put filename in .string).
+        let imageURLs = extractImageFileURLs(from: pasteboard)
+        if !imageURLs.isEmpty {
+            var loaded: [(NSImage, Data?)] = []
+            for url in imageURLs {
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let size = attrs[.size] as? Int, size > Self.maxPastedImageBytes {
+                    continue
+                }
+                guard let data = try? Data(contentsOf: url),
+                      data.count <= Self.maxPastedImageBytes,
+                      let img = NSImage(data: data) else { continue }
+                let rawPNG: Data? = url.pathExtension.lowercased() == "png" ? data : nil
+                loaded.append((img, rawPNG))
+            }
+            if !loaded.isEmpty {
+                insertImages(loaded)
+                return true
+            }
+        }
+
+        // 2. Direct clipboard image (screenshots, browser "Copy Image", Preview, Piko Clipboard).
+        // Skip if non-empty plain text is present so copying formatted text from Word/Excel still pastes text.
+        let types = Set(pasteboard.types ?? [])
+        let hasNonEmptyPlainText: Bool = {
+            guard types.contains(.string), let s = pasteboard.string(forType: .string) else { return false }
+            return s.contains(where: { !$0.isWhitespace && !$0.isNewline })
+        }()
+        guard !hasNonEmptyPlainText else { return false }
+
+        if types.contains(.png), let pngData = pasteboard.data(forType: .png),
+           pngData.count <= Self.maxPastedImageBytes,
+           let img = NSImage(data: pngData) {
+            insertImages([(img, pngData)])
+            return true
+        }
+        if types.contains(Self.jpegPasteboardType), let jpgData = pasteboard.data(forType: Self.jpegPasteboardType),
+           jpgData.count <= Self.maxPastedImageBytes,
+           let img = NSImage(data: jpgData) {
+            insertImages([(img, nil)])
+            return true
+        }
+        if types.contains(.tiff), let tiffData = pasteboard.data(forType: .tiff),
+           tiffData.count <= Self.maxPastedImageBytes,
+           let img = NSImage(data: tiffData) {
+            insertImages([(img, nil)])
+            return true
+        }
+        if NSImage.canInit(with: pasteboard),
+           let img = NSImage(pasteboard: pasteboard),
+           img.size.width > 0, img.size.height > 0 {
+            insertImages([(img, nil)])
+            return true
+        }
+        return false
+    }
+
+    func insertImages(_ items: [(image: NSImage, rawPNGData: Data?)]) {
+        guard isEditable, isRichText, allowImageAttachments, let storage = textStorage, !items.isEmpty else { return }
+
+        var stored: [(fileName: String, image: NSImage)] = []
+        for (img, rawPNG) in items {
+            if let result = onStoreImage?(img, rawPNG) {
+                stored.append(result)
+            }
+        }
+        guard !stored.isEmpty else { return }
+
+        let sel = selectedRange()
+        let nsText = string as NSString
+        let needsLeadingNewline: Bool = {
+            guard sel.location > 0, sel.location <= nsText.length else { return false }
+            let prev = nsText.character(at: sel.location - 1)
+            return prev != 0x0A && prev != 0x0D
+        }()
+
+        let clean = PlaceholderNoteTextView.baseAttributes(fontSize: baseFontSize, lineSpacing: baseLineSpacing)
+        let imagePara = NSMutableParagraphStyle()
+        imagePara.lineSpacing = baseLineSpacing
+        imagePara.paragraphSpacingBefore = 3
+        imagePara.paragraphSpacing = 4
+
+        let payload = NSMutableAttributedString()
+        if needsLeadingNewline {
+            payload.append(NSAttributedString(string: "\n", attributes: clean))
+        }
+        for entry in stored {
+            let attachment = NoteImageTextAttachment(fileName: entry.fileName, image: entry.image)
+            let imgAttr = NSMutableAttributedString(attachment: attachment)
+            imgAttr.addAttribute(.paragraphStyle, value: imagePara, range: NSRange(location: 0, length: imgAttr.length))
+            payload.append(imgAttr)
+            payload.append(NSAttributedString(string: "\n", attributes: clean))
+        }
+
+        isApplyingAutoMarkdown = true
+        defer { isApplyingAutoMarkdown = false }
+
+        if shouldChangeText(in: sel, replacementString: payload.string) {
+            storage.replaceCharacters(in: sel, with: payload)
+            didChangeText()
+            let nextLoc = sel.location + payload.length
+            setSelectedRange(NSRange(location: nextLoc, length: 0))
+            typingAttributes = clean
+            onTypingFormatChanged?()
+        }
     }
 
     private func pasteSanitizedPlainText() {
@@ -1664,6 +2226,39 @@ final class PlaceholderNSTextView: NSTextView {
         let baseMenu = super.menu(for: event) ?? NSMenu()
         let selected = currentSelectedSubstring
         var insertIndex = 0
+
+        if isRichText, allowImageAttachments, let hit = imageAttachment(at: event) {
+            contextMenuImageAttachment = hit
+
+            let previewItem = NSMenuItem(title: "预览原图", action: #selector(handleMenuPreviewImage), keyEquivalent: "")
+            previewItem.target = self
+            previewItem.image = NSImage(systemSymbolName: "eye", accessibilityDescription: nil)
+            baseMenu.insertItem(previewItem, at: insertIndex)
+            insertIndex += 1
+
+            let copyImgItem = NSMenuItem(title: "复制图片", action: #selector(handleMenuCopyImage), keyEquivalent: "")
+            copyImgItem.target = self
+            copyImgItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
+            baseMenu.insertItem(copyImgItem, at: insertIndex)
+            insertIndex += 1
+
+            let saveImgItem = NSMenuItem(title: "存储图片…", action: #selector(handleMenuSaveImage), keyEquivalent: "")
+            saveImgItem.target = self
+            saveImgItem.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: nil)
+            baseMenu.insertItem(saveImgItem, at: insertIndex)
+            insertIndex += 1
+
+            let deleteImgItem = NSMenuItem(title: "删除图片", action: #selector(handleMenuDeleteImage), keyEquivalent: "")
+            deleteImgItem.target = self
+            deleteImgItem.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+            baseMenu.insertItem(deleteImgItem, at: insertIndex)
+            insertIndex += 1
+
+            baseMenu.insertItem(.separator(), at: insertIndex)
+            insertIndex += 1
+        } else {
+            contextMenuImageAttachment = nil
+        }
 
         if onSendSelectionToBoard != nil, !selected.isEmpty {
             let lines = selected
@@ -1778,6 +2373,51 @@ final class PlaceholderNSTextView: NSTextView {
     @objc private func handleMenuStrikethrough() { applyFormatAction(.toggleStrikethrough) }
     @objc private func handleMenuInlineCode() { applyFormatAction(.insertMarkdown(.inlineCode)) }
     @objc private func handleMenuClearFormatting() { applyFormatAction(.clearFormatting) }
+
+    @objc private func handleMenuPreviewImage() {
+        guard let hit = contextMenuImageAttachment else { return }
+        previewImageAttachment(hit.attachment)
+    }
+
+    @objc private func handleMenuCopyImage() {
+        guard let hit = contextMenuImageAttachment else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([hit.attachment.originalImage])
+    }
+
+    @objc private func handleMenuSaveImage() {
+        guard let hit = contextMenuImageAttachment else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "Piko-Note-Image.png"
+        panel.level = .modalPanel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard response == .OK, let destURL = panel.url else { return }
+            if let srcURL = self?.imageURLResolver?(hit.attachment.fileName),
+               FileManager.default.fileExists(atPath: srcURL.path) {
+                try? FileManager.default.removeItem(at: destURL)
+                try? FileManager.default.copyItem(at: srcURL, to: destURL)
+            } else if let tiff = hit.attachment.originalImage.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: destURL, options: .atomic)
+            }
+        }
+    }
+
+    @objc private func handleMenuDeleteImage() {
+        guard let hit = contextMenuImageAttachment, let storage = textStorage else { return }
+        let range = NSRange(location: hit.charIndex, length: 1)
+        guard NSMaxRange(range) <= storage.length else { return }
+        if shouldChangeText(in: range, replacementString: "") {
+            storage.deleteCharacters(in: range)
+            didChangeText()
+            setSelectedRange(NSRange(location: min(hit.charIndex, storage.length), length: 0))
+        }
+        contextMenuImageAttachment = nil
+    }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)

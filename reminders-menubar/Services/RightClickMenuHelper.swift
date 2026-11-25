@@ -129,7 +129,11 @@ final class RightClickMenuHelper: NSObject {
     @objc private func checkForUpdatesAction() {
         NSApp.openAppSettings(tab: .maintenance)
         let updater = AppUpdateService.shared
-        if !updater.hasAvailableUpdate && !updater.state.isBusy {
+        let isError: Bool = {
+            if case .error = updater.state { return true }
+            return false
+        }()
+        if (!updater.hasAvailableUpdate || isError) && !updater.state.isBusy {
             Task {
                 await updater.checkForUpdates(userInitiated: true)
             }

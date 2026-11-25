@@ -74,6 +74,7 @@ struct SettingsOpenerView: View {
     @State private var settingsCloseCancellable: AnyCancellable?
     @State private var settingsWindow: NSWindow?
     @State private var pendingCancel: (() -> Void)?
+    @State private var didSwitchFromAccessory = false
 
     var body: some View {
         SettingsOpenerHiddenWindow()
@@ -97,11 +98,16 @@ struct SettingsOpenerView: View {
     }
 
     private func handleOpenSettingsRequest() async {
-        // If settings window is already open, just bring it to front.
-        if let existingWindow = settingsWindow ?? NSApp.windows.first(where: Self.isSettingsWindow),
-           existingWindow.isVisible {
+        // If settings window is already open (including minimized/hidden), restore and bring it above floating panels.
+        if let existingWindow = settingsWindow ?? NSApp.windows.first(where: { Self.isSettingsWindow($0, allowHiddenOrMiniaturized: true) }),
+           (existingWindow.isVisible || existingWindow.isMiniaturized) {
             settingsWindow = existingWindow
-            NSApp.activate()
+            if existingWindow.isMiniaturized {
+                existingWindow.deminiaturize(nil)
+            }
+            existingWindow.level = .floating
+            NSApp.unhide(nil)
+            NSApp.activate(ignoringOtherApps: true)
             existingWindow.makeKeyAndOrderFront(nil)
             existingWindow.orderFrontRegardless()
             return
@@ -114,9 +120,11 @@ struct SettingsOpenerView: View {
         // Clear any stale reference from a previous session.
         settingsWindow = nil
 
-        // Temporarily show dock icon so macOS allows the window to come to front.
-        let wasAccessory = NSApp.activationPolicy() == .accessory
-        if wasAccessory {
+        // Temporarily show dock icon so macOS allows the window to come to front; preserve
+        // `didSwitchFromAccessory` across minimize/reopen so closing never leaks the Dock icon.
+        let switchedThisOpen = NSApp.activationPolicy() == .accessory
+        if switchedThisOpen {
+            didSwitchFromAccessory = true
             NSApp.setActivationPolicy(.regular)
             try? await Task.sleep(for: .milliseconds(200))
         }
@@ -182,22 +190,26 @@ struct SettingsOpenerView: View {
 
         if let window {
             settingsWindow = window
-            NSApp.activate()
+            // Float above Piko's floating board/mini panels so Settings is never buried behind them.
+            window.level = .floating
+            NSApp.unhide(nil)
+            NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
 
             // Clean settingsWindow state and restore accessory policy when the settings window closes.
-            observeSettingsClose(window, wasAccessory: wasAccessory)
-        } else if wasAccessory {
+            observeSettingsClose(window)
+        } else if switchedThisOpen {
             // Window never appeared; restore accessory policy immediately.
+            didSwitchFromAccessory = false
             NSApp.setActivationPolicy(.accessory)
         }
     }
 
-    static func isSettingsWindow(_ window: NSWindow) -> Bool {
+    static func isSettingsWindow(_ window: NSWindow, allowHiddenOrMiniaturized: Bool = false) -> Bool {
         guard !(window is NSPanel),
               window.styleMask.contains(.titled),
-              window.isVisible,
+              (allowHiddenOrMiniaturized || window.isVisible),
               window.frame.height > 100 else {
             return false
         }
@@ -212,14 +224,15 @@ struct SettingsOpenerView: View {
         return idMatch || titleMatch || swiftUISettingsClass
     }
 
-    private func observeSettingsClose(_ window: NSWindow, wasAccessory: Bool) {
+    private func observeSettingsClose(_ window: NSWindow) {
         settingsCloseCancellable?.cancel()
         settingsCloseCancellable = NotificationCenter.default
             .publisher(for: NSWindow.willCloseNotification, object: window)
             .first()
             .sink { _ in
                 settingsWindow = nil
-                if wasAccessory {
+                if didSwitchFromAccessory {
+                    didSwitchFromAccessory = false
                     NSApp.setActivationPolicy(.accessory)
                 }
             }
