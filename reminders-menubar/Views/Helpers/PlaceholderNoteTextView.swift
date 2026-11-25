@@ -119,17 +119,16 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         if isRichTextEnabled, let rtf = initialRTFData,
            let normalized = Self.normalizedAttributedString(fromRTF: rtf, fontSize: fontSize, lineSpacing: lineSpacing) {
             textView.textStorage?.setAttributedString(normalized)
-            context.coordinator.lastSyncedPlainText = normalized.string
         } else {
             let baseAttrs = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
             textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: baseAttrs))
-            context.coordinator.lastSyncedPlainText = text
         }
+        context.coordinator.lastSyncedPlainText = text
         context.coordinator.lastSyncedRevision = noteRevision
 
         textView.typingAttributes = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
         formattingController?.textView = textView
-        formattingController?.activeFormat = textView.currentFormatState()
+        context.coordinator.syncFormatState(from: textView)
 
         scrollView.documentView = textView
         scrollView.isHidden = !isActive
@@ -164,12 +163,17 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
         if isRichTextEnabled {
             if lastEditOriginId == editorId {
+                context.coordinator.lastSyncedPlainText = text
                 context.coordinator.lastSyncedRevision = noteRevision
                 return
             }
 
+            // Skip redundant RTF decoding & layout for hidden paired editors (e.g. background mini/main panel);
+            // when `isActive` turns true, `updateNSView` fires again and syncs the latest revision immediately.
+            guard isActive else { return }
+
             let needsExternalSync = (noteRevision != context.coordinator.lastSyncedRevision)
-                || (textView.string != text)
+                || (text != context.coordinator.lastSyncedPlainText)
             guard needsExternalSync else { return }
 
             let savedSelection = textView.selectedRanges
@@ -184,7 +188,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
                 let baseAttrs = Self.baseAttributes(fontSize: fontSize, lineSpacing: lineSpacing)
                 textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: baseAttrs))
             }
-            context.coordinator.lastSyncedPlainText = textView.string
+            context.coordinator.lastSyncedPlainText = text
             context.coordinator.lastSyncedRevision = noteRevision
 
             let maxLen = textView.textStorage?.length ?? 0
@@ -197,7 +201,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             if !clamped.isEmpty {
                 textView.selectedRanges = clamped
             }
-            formattingController?.activeFormat = textView.currentFormatState()
+            context.coordinator.syncFormatState(from: textView)
             textView.needsDisplay = true
         } else if textView.string != text {
             let savedSelection = textView.selectedRanges
@@ -312,6 +316,40 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         return font
     }
 
+    /// Normalizes line endings and removes control/attachment sentinel characters that mutate or disappear
+    /// during RTF round-trips (`\r\n`, `\r`, `\u{2029}`, `\0`, `\u{FFFC}`), keeping plain text and RTF identical.
+    static func sanitizedPlainTextForInsertion(_ raw: String) -> String {
+        // Inspect Unicode scalars (not Swift Characters, where `\r\n` is a single grapheme cluster != `\r`).
+        let needsSanitization = raw.unicodeScalars.contains { scalar in
+            scalar == "\r" || scalar == "\u{2029}" || scalar == "\0" || scalar == "\u{FFFC}"
+        }
+        guard needsSanitization else { return raw }
+
+        var output = String()
+        output.unicodeScalars.reserveCapacity(raw.unicodeScalars.count)
+        var previousWasCR = false
+        for scalar in raw.unicodeScalars {
+            if scalar == "\r" {
+                output.unicodeScalars.append("\n")
+                previousWasCR = true
+                continue
+            }
+            if scalar == "\n", previousWasCR {
+                previousWasCR = false
+                continue
+            }
+            previousWasCR = false
+            if scalar == "\u{2029}" {
+                output.unicodeScalars.append("\n")
+            } else if scalar == "\0" || scalar == "\u{FFFC}" {
+                continue
+            } else {
+                output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
+    }
+
     static func normalizedAttributedString(
         fromRTF data: Data,
         fontSize: CGFloat,
@@ -328,43 +366,107 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         }
 
         let nsStr = decoded.string as NSString
+        let defaultParagraphStyle = NSMutableParagraphStyle()
+        defaultParagraphStyle.lineSpacing = lineSpacing
+        let monoFont = NSFont.monospacedSystemFont(ofSize: max(11, fontSize - 1), weight: .regular)
 
+        struct FontKey: Hashable {
+            let sizeTenths: Int
+            let isBold: Bool
+            let isItalic: Bool
+        }
+        var fontCache: [FontKey: NSFont] = [:]
+        func cachedFont(size: CGFloat, isBold: Bool, isItalic: Bool) -> NSFont {
+            let key = FontKey(sizeTenths: Int((size * 10).rounded()), isBold: isBold, isItalic: isItalic)
+            if let hit = fontCache[key] { return hit }
+            let created = resolvedFont(size: size, isBold: isBold, isItalic: isItalic)
+            fontCache[key] = created
+            return created
+        }
+
+        struct FontTraitsSummary {
+            let isMono: Bool
+            let isBold: Bool
+            let isItalic: Bool
+            let pointSize: CGFloat
+        }
+        var traitsCache: [ObjectIdentifier: FontTraitsSummary] = [:]
+        func fontSummary(for font: NSFont) -> FontTraitsSummary {
+            let id = ObjectIdentifier(font)
+            if let hit = traitsCache[id] { return hit }
+            let traits = NSFontManager.shared.traits(of: font)
+            let summary = FontTraitsSummary(
+                isMono: font.fontDescriptor.symbolicTraits.contains(.monoSpace),
+                isBold: traits.contains(.boldFontMask),
+                isItalic: traits.contains(.italicFontMask),
+                pointSize: font.pointSize
+            )
+            traitsCache[id] = summary
+            return summary
+        }
+
+        // Cache line-level prefix flags so multi-run lines (e.g. mixed CJK/ASCII) stay strictly O(N).
+        var cachedLineEnd = -1
+        var isDividerLine = false
+        var isQuoteLine = false
+        var isCheckedLine = false
+
+        result.beginEditing()
         decoded.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
-            let chunk = nsStr.substring(with: range)
-            let lineRange = nsStr.lineRange(for: NSRange(location: range.location, length: 0))
-            let lineStr = nsStr.substring(with: lineRange)
+            if range.location >= cachedLineEnd {
+                let lineRange = nsStr.lineRange(for: NSRange(location: range.location, length: 0))
+                cachedLineEnd = NSMaxRange(lineRange)
+                let prefixLen = min(4, lineRange.length)
+                let linePrefix = prefixLen > 0
+                    ? nsStr.substring(with: NSRange(location: lineRange.location, length: prefixLen))
+                    : ""
+                isDividerLine = linePrefix.hasPrefix("────")
+                isQuoteLine = linePrefix.hasPrefix("▎ ")
+                isCheckedLine = linePrefix.hasPrefix("☑ ")
+            }
 
-            let font = attrs[.font] as? NSFont
-            let traits = font.map { NSFontManager.shared.traits(of: $0) } ?? []
-            let isMono = font?.fontDescriptor.symbolicTraits.contains(.monoSpace) ?? false
-            let isBold = traits.contains(.boldFontMask)
+            let summary = (attrs[.font] as? NSFont).map(fontSummary(for:))
+            let isMono = summary?.isMono ?? false
+            let isBold = summary?.isBold ?? false
             let obliq = (attrs[.obliqueness] as? NSNumber)?.doubleValue ?? 0
-            let isItalic = traits.contains(.italicFontMask) || obliq > 0.05
+            let isItalic = (summary?.isItalic ?? false) || obliq > 0.05
             let underlineRaw = (attrs[.underlineStyle] as? NSNumber)?.intValue ?? 0
             let strikeRaw = (attrs[.strikethroughStyle] as? NSNumber)?.intValue ?? 0
             let bgColor = attrs[.backgroundColor] as? NSColor
             let isYellow = NoteMarkdownConverter.isYellowHighlightColor(bgColor)
 
-            let trimmedChunk = chunk.trimmingCharacters(in: .whitespaces)
+            // Only inspect chunk string for short runs or checked lines (avoids copying huge text runs).
+            let trimmedChunk: String = {
+                guard range.length <= 16 else { return "" }
+                return nsStr.substring(with: range).trimmingCharacters(in: .whitespaces)
+            }()
             let isCheckboxGlyph = trimmedChunk == "☐" || trimmedChunk == "☑"
 
             // Preserve heading sizes cleanly while keeping checkbox glyphs distinct from H3
             let resolvedSize: CGFloat = {
                 if isCheckboxGlyph { return fontSize + 0.8 }
-                guard let pt = font?.pointSize else { return fontSize }
+                guard let pt = summary?.pointSize else { return fontSize }
                 if pt >= fontSize + 4.5 { return fontSize + 5.5 }
                 if pt >= fontSize + 2.2 { return fontSize + 3.0 }
                 if pt >= fontSize + 1.2 { return fontSize + 1.5 }
                 return fontSize
             }()
 
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.lineSpacing = lineSpacing
-            if let oldPara = attrs[.paragraphStyle] as? NSParagraphStyle {
-                paragraphStyle.headIndent = oldPara.headIndent
-                paragraphStyle.firstLineHeadIndent = oldPara.firstLineHeadIndent
-                paragraphStyle.paragraphSpacingBefore = oldPara.paragraphSpacingBefore
-                paragraphStyle.paragraphSpacing = oldPara.paragraphSpacing
+            let paragraphStyle: NSParagraphStyle
+            if let oldPara = attrs[.paragraphStyle] as? NSParagraphStyle,
+               oldPara.headIndent != 0
+                || oldPara.firstLineHeadIndent != 0
+                || oldPara.paragraphSpacingBefore != 0
+                || oldPara.paragraphSpacing != 0 {
+                let customPara = NSMutableParagraphStyle()
+                customPara.lineSpacing = lineSpacing
+                customPara.headIndent = oldPara.headIndent
+                customPara.firstLineHeadIndent = oldPara.firstLineHeadIndent
+                customPara.paragraphSpacingBefore = oldPara.paragraphSpacingBefore
+                customPara.paragraphSpacing = oldPara.paragraphSpacing
+                paragraphStyle = customPara
+            } else {
+                paragraphStyle = defaultParagraphStyle
             }
 
             let resolvedFG: NSColor = {
@@ -374,11 +476,19 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
                 if trimmedChunk == "☐" {
                     return .secondaryLabelColor
                 }
-                if lineStr.hasPrefix("────") {
+                if isDividerLine {
                     return .tertiaryLabelColor
                 }
-                if lineStr.hasPrefix("▎ ") || (lineStr.hasPrefix("☑ ") && !chunk.contains("☑")) {
+                if isQuoteLine {
                     return .secondaryLabelColor
+                }
+                if isCheckedLine {
+                    let chunkHasCheckedGlyph = range.length <= 16
+                        ? trimmedChunk.contains("☑")
+                        : nsStr.range(of: "☑", options: [], range: range).location != NSNotFound
+                    if !chunkHasCheckedGlyph {
+                        return .secondaryLabelColor
+                    }
                 }
                 return .labelColor
             }()
@@ -389,10 +499,10 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
             ]
 
             if isMono {
-                normalizedAttrs[.font] = NSFont.monospacedSystemFont(ofSize: max(11, fontSize - 1), weight: .regular)
+                normalizedAttrs[.font] = monoFont
                 normalizedAttrs[.backgroundColor] = inlineCodeBackgroundColor
             } else {
-                normalizedAttrs[.font] = resolvedFont(size: resolvedSize, isBold: isBold, isItalic: isItalic)
+                normalizedAttrs[.font] = cachedFont(size: resolvedSize, isBold: isBold, isItalic: isItalic)
                 if isItalic {
                     normalizedAttrs[.obliqueness] = NSNumber(value: Double(chineseItalicObliqueness))
                 }
@@ -410,6 +520,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
 
             result.setAttributes(normalizedAttrs, range: range)
         }
+        result.endEditing()
         return result
     }
 
@@ -426,7 +537,7 @@ struct PlaceholderNoteTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? PlaceholderNSTextView else { return }
             textView.needsDisplay = true
-            guard !textView.hasMarkedText() else { return }
+            guard !textView.hasMarkedText(), !textView.isSuppressingNestedTextDidChange else { return }
             textView.processLiveMarkdownIfNeeded()
             syncRichTextAndFormat(from: textView)
             reportSelection(for: textView)
@@ -553,6 +664,7 @@ final class PlaceholderNSTextView: NSTextView {
     }
 
     private var isApplyingAutoMarkdown = false
+    fileprivate var isSuppressingNestedTextDidChange = false
 
     // MARK: - Live WYSIWYG Markdown Engine (所写即所见)
 
@@ -573,11 +685,15 @@ final class PlaceholderNSTextView: NSTextView {
         let nsText = string as NSString
         let lineRange = nsText.lineRange(for: NSRange(location: sel.location, length: 0))
         let prefixLen = sel.location - lineRange.location
-        guard prefixLen > 0 else { return }
+        guard prefixLen > 0, prefixLen <= 4_096 else { return }
         let lineBeforeCaret = nsText.substring(with: NSRange(location: lineRange.location, length: prefixLen))
 
         isApplyingAutoMarkdown = true
-        defer { isApplyingAutoMarkdown = false }
+        isSuppressingNestedTextDidChange = true
+        defer {
+            isSuppressingNestedTextDidChange = false
+            isApplyingAutoMarkdown = false
+        }
 
         // 1. Block-level instant transforms triggered on Space at start of line
         if tryApplyBlockMarkdown(lineBeforeCaret: lineBeforeCaret, lineRange: lineRange, caretLocation: sel.location) {
@@ -1478,11 +1594,46 @@ final class PlaceholderNSTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        if isRichText {
-            pasteAsPlainText(sender)
-        } else {
-            super.paste(sender)
+        pasteSanitizedPlainText()
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        pasteSanitizedPlainText()
+    }
+
+    private func pasteSanitizedPlainText() {
+        guard isEditable else { return }
+        guard let rawText = readPlainTextFromGeneralPasteboard() else { return }
+        let sanitized = PlaceholderNoteTextView.sanitizedPlainTextForInsertion(rawText)
+        guard !sanitized.isEmpty else { return }
+
+        if typingAttributes[.font] == nil {
+            typingAttributes = PlaceholderNoteTextView.baseAttributes(
+                fontSize: baseFontSize,
+                lineSpacing: baseLineSpacing
+            )
         }
+
+        // Prevent live-typing Markdown regex from mutating pasted code/text or doubling RTF export.
+        isApplyingAutoMarkdown = true
+        defer { isApplyingAutoMarkdown = false }
+        insertText(sanitized, replacementRange: NSRange(location: NSNotFound, length: 0))
+    }
+
+    private func readPlainTextFromGeneralPasteboard() -> String? {
+        let pasteboard = NSPasteboard.general
+        if let plain = pasteboard.string(forType: .string) {
+            return plain
+        }
+        if let rtfData = pasteboard.data(forType: .rtf),
+           let decoded = NSAttributedString(rtf: rtfData, documentAttributes: nil) {
+            return decoded.string
+        }
+        if let rtfdData = pasteboard.data(forType: .rtfd),
+           let decoded = NSAttributedString(rtfd: rtfdData, documentAttributes: nil) {
+            return decoded.string
+        }
+        return nil
     }
 
     // MARK: - Placeholder Drawing & Context Menu

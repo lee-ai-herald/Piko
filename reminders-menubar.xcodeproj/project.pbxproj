@@ -627,7 +627,7 @@
 				INFOPLIST_FILE = "reminders-menubar/Info.plist";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 2.2.3;
+				MARKETING_VERSION = 2.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "br.com.damascenorafael.reminders-menubar";
 				PRODUCT_NAME = Piko;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -713,7 +713,7 @@
 				INFOPLIST_FILE = "reminders-menubar/Info.plist";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 2.2.3;
+				MARKETING_VERSION = 2.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "br.com.damascenorafael.reminders-menubar";
 				PRODUCT_NAME = Piko;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -864,7 +864,7 @@
 				INFOPLIST_FILE = "reminders-menubar/Info.plist";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 2.2.3;
+				MARKETING_VERSION = 2.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "br.com.damascenorafael.reminders-menubar";
 				PRODUCT_NAME = Piko;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -889,7 +889,7 @@
 				INFOPLIST_FILE = "reminders-menubar/Info.plist";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 2.2.3;
+				MARKETING_VERSION = 2.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "br.com.damascenorafael.reminders-menubar";
 				PRODUCT_NAME = Piko;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -127,20 +127,26 @@ struct QuickNoteItem: Identifiable, Codable, Equatable {
     }
 
     private static func computeDisplayAndPreview(title: String, content: String) -> (title: String, preview: String) {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = content
+        let trimmedTitle = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+        // Bound work to the leading slice so pasting huge single-line notes stays O(1).
+        let sample = content.count > 2_400 ? String(content.prefix(2_400)) : content
+        let lines = sample
             .split(whereSeparator: \.isNewline)
             .prefix(12)
-            .map { NoteMarkdownConverter.strippedPlainText(String($0)) }
+            .map { NoteMarkdownConverter.strippedPlainText(String($0.prefix(240))) }
             .filter { !$0.isEmpty }
 
         if trimmedTitle.isEmpty {
             let resolvedTitle = lines.first ?? "空白随笔"
             let remaining = Array(lines.dropFirst())
-            let preview = remaining.isEmpty ? "暂无更多内容" : remaining.joined(separator: " ")
+            let preview = remaining.isEmpty
+                ? "暂无更多内容"
+                : String(remaining.joined(separator: " ").prefix(280))
             return (resolvedTitle, preview)
         } else {
-            let preview = lines.isEmpty ? "暂无正文内容" : lines.joined(separator: " ")
+            let preview = lines.isEmpty
+                ? "暂无正文内容"
+                : String(lines.joined(separator: " ").prefix(280))
             return (trimmedTitle, preview)
         }
     }

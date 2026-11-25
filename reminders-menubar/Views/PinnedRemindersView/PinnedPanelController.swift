@@ -738,6 +738,7 @@ final class PinnedPanelController: NSObject, NSWindowDelegate, ObservableObject 
         if main.frame != targetWindowFrame {
             main.setFrame(targetWindowFrame, display: false)
         }
+        main.layoutIfNeeded()
         isProgrammaticFrameUpdate = false
 
         guard shouldAnimateFromMini, let outgoingMini else {
