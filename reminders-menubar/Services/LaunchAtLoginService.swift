@@ -14,6 +14,11 @@ final class LaunchAtLoginService: ObservableObject {
     static let shared = LaunchAtLoginService()
 
     @Published private(set) var status: Status = .disabled
+    @Published private(set) var errorMessage: String?
+
+    private var isRunningFromAppBundle: Bool {
+        Bundle.main.bundleURL.pathExtension.lowercased() == "app"
+    }
 
     private init() {
         refresh()
@@ -24,6 +29,7 @@ final class LaunchAtLoginService: ObservableObject {
     }
 
     func setEnabled(_ isEnabled: Bool) {
+        errorMessage = nil
         let mainAppService = SMAppService.mainApp
         let isRegistered = mainAppService.status == .enabled || mainAppService.status == .requiresApproval
         guard isRegistered != isEnabled else {
@@ -38,6 +44,12 @@ final class LaunchAtLoginService: ObservableObject {
                 try mainAppService.unregister()
             }
         } catch {
+            let bundlePath = Bundle.main.bundleURL.path
+            if isEnabled && (bundlePath.contains("/AppTranslocation/") || !bundlePath.hasPrefix("/Applications/")) {
+                errorMessage = "请先将 \(AppConstants.appName) 移至「应用程序」文件夹后再开启"
+            } else {
+                errorMessage = "\(isEnabled ? "开启" : "关闭")失败：\(error.localizedDescription)"
+            }
             print("Failed to \(isEnabled ? "enable" : "disable") launch at login:", error.localizedDescription)
         }
         refresh()
@@ -47,10 +59,13 @@ final class LaunchAtLoginService: ObservableObject {
         switch SMAppService.mainApp.status {
         case .enabled:
             status = .enabled
+            errorMessage = nil
         case .requiresApproval:
             status = .requiresApproval
+            errorMessage = nil
         case .notFound:
-            status = .unavailable
+            // macOS returns `.notFound` before an app has ever been registered in BTM; allow toggling from a real `.app` bundle.
+            status = isRunningFromAppBundle ? .disabled : .unavailable
         case .notRegistered:
             status = .disabled
         @unknown default:

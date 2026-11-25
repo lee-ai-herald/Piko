@@ -12,7 +12,9 @@ struct GeneralSettingsTab: View {
                 SettingsCard(title: "启动与窗口") {
                     SettingsRow(
                         "开机启动",
-                        subtitle: launchAtLoginService.status == .requiresApproval ? "需在系统设置「登录项」中批准" : nil
+                        subtitle: launchAtLoginService.status == .requiresApproval
+                            ? "需在系统设置「登录项」中批准"
+                            : launchAtLoginService.errorMessage
                     ) {
                         HStack(spacing: 8) {
                             if launchAtLoginService.status == .requiresApproval {

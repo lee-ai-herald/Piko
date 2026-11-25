@@ -37,7 +37,7 @@ def read_marketing_version() -> str:
         match = re.search(r"MARKETING_VERSION\s*=\s*([^;\s]+);", PBXPROJ_PATH.read_text(encoding="utf-8"))
         if match:
             return match.group(1)
-    return "2.2.6"
+    return "2.2.7"
 
 
 def strip_previews(code: str) -> str:
